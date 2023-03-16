@@ -9,7 +9,6 @@ ti.init(arch=ti.gpu)
 
 camera_active = False
 
-
 #bounds
 
 left_bound = -20.0
@@ -66,6 +65,13 @@ scalar_field = ti.field(dtype=float,shape=num_points)
 
 corners = ti.Vector.field(dim,dtype=float,shape=(8,))
 
+num_neighbors = ti.field(dtype=int,shape=total_particles)
+boundary = ti.field(dtype=int,shape=total_particles)
+b = ti.Vector.field(3,dtype=float,shape=(total_particles,))
+
+colour = ti.Vector.field(3,dtype=float,shape=(total_particles,))
+
+
 corners[0] = [left_bound,top_bound,back_bound]
 corners[1] = [left_bound,top_bound,front_bound]
 corners[2] = [left_bound,bottom_bound,back_bound]
@@ -74,6 +80,7 @@ corners[4] = [right_bound,top_bound,back_bound]
 corners[5] = [right_bound,top_bound,front_bound]
 corners[6] = [right_bound,bottom_bound,back_bound]
 corners[7] = [right_bound,bottom_bound,front_bound]
+
 
 
 num_cubes = (num_points_x-1)*(num_points_y-1)*(num_points_z-1)
@@ -183,10 +190,13 @@ def initialize_mass_points():
                 x[index] = [(i*diameter + p_left_bound) + ti.random() / 10,
                  j*diameter + p_bottom_bound,
                  k*diameter + p_front_bound + ti.random() / 10]
-                v[index] = [0,0,0]
-                f[index] = [0,0,0]
+                v[index] = [0.0,0.0,0.0]
+                f[index] = [0.0,0.0,0.0]
                 rho[index] = 0.0
                 p[index] = 0.0
+                colour[index] =[0.2, 0.2, 0.8]
+                b[index] = [0.0,0.0,0.0]
+                boundary[index] = 1
 
 @ti.func
 def ComputeDensityPressure():
@@ -208,12 +218,61 @@ def ComputeForces():
         for j in range(0,total_particles):
             if i != j:
                 rij = x[j] - x[i]
+
                 r = ti.math.length(rij)
                 if r < h:
                     fpress += -ti.math.normalize(rij) * mass * (p[i] + p[j]) / (2.0 * rho[j]) * SPIKY_GRAD * ti.math.pow(h-r,3.0)
                     fvisc += visc * mass * (v[j] - v[i]) / rho[j] * VISC_LAP * (h-r)
         fgrav = gravity * mass / rho[i]
         f[i] = fgrav + fvisc + fpress
+
+
+@ti.func
+def calc_cover_vector():
+    for i in range(0,total_particles):
+        b[i] = [0.0,0.0,0.0]
+        num_neighbors[i] = 0
+        for j in range(0,total_particles):
+            rij = x[i] - x[j]
+            r = ti.math.length(rij)
+            if r <= h and i != j:
+                b[i] += ti.math.normalize(rij)
+                num_neighbors[i] += 1
+
+
+@ti.kernel
+def detect_surface():
+    for i in range(0,total_particles):
+        for j in range(0,total_particles):
+            rji = x[j] - x[i]
+            if ti.math.length(rji) <= h and i != j:
+                nrji= ti.math.normalize(rji)
+                theta = ti.math.pi/3
+                if ti.math.acos(ti.math.dot(nrji,ti.math.normalize(b[i]))) <= theta/2:
+                    boundary[i] = 0
+    # for i in range(0,total_particles):
+    #     if rho[i] > -60000:
+    #         boundary[i] = 1
+    #     else:
+    #         boundary[i] = 1
+    # for i in range(0,total_particles):
+    #     for j in range(0,total_particles):
+    #         rij = x[j] - x[i]
+    #         if ti.math.length(rij) < 10:
+    #             nrij = ti.math.normalize(rij)
+    #             if ti.math.acos(ti.math.dot(nrij,ti.math.normalize(b[i]))) < 10:
+    #                 boundary[i] = 1
+    #             else:
+    #                 boundary[i] = 0
+
+@ti.func
+def neighbour_check():
+    for i in range(0,total_particles):
+        if num_neighbors[i] <= 15:
+            boundary[i] = 1
+    
+
+
 
 @ti.func
 def integrate():
@@ -226,7 +285,7 @@ def integrate():
             x[i][0] = left_bound
         if(x[i][0] > right_bound):
             v[i][0] *= bound_damping
-            x[i][0] = left_bound
+            x[i][0] = right_bound
         if(x[i][1] < 0.0):
             v[i][1] *= bound_damping
             x[i][1] = bottom_bound
@@ -243,24 +302,16 @@ def integrate():
 vertlist = ti.Vector.field(3,dtype=float,shape=(12,))
 
 isolevel = 20.0
-@ti.func
-def calc_cube_index():
-    for index in range(0,num_cubes):
-        cubeindex = 0
-        if scalar_field[cubes[index].val1] > isolevel: cubeindex |= 1
-        if scalar_field[cubes[index].val2] > isolevel: cubeindex |= 2
-        if scalar_field[cubes[index].val3] > isolevel: cubeindex |= 4
-        if scalar_field[cubes[index].val4] > isolevel: cubeindex |= 8
-        if scalar_field[cubes[index].val5] > isolevel: cubeindex |= 16
-        if scalar_field[cubes[index].val6] > isolevel: cubeindex |= 32
-        if scalar_field[cubes[index].val7] > isolevel: cubeindex |= 64
-        if scalar_field[cubes[index].val8] > isolevel: cubeindex |= 128
-        cube_indexes[index] = cubeindex
-
+# @ti.func
 def create_iso_surface(index):
     for i in range(0,12):
         vertlist[i] = [0.0,0.0,0.0]
     cubeindex = 0
+
+    # for i in range(0,8):
+    #     if scalar_field[cubes[index].val1] > isolevel:
+    #         cubeindex |= 1 << i
+
     if scalar_field[cubes[index].val1] > isolevel: cubeindex |= 1
     if scalar_field[cubes[index].val2] > isolevel: cubeindex |= 2
     if scalar_field[cubes[index].val3] > isolevel: cubeindex |= 4
@@ -302,9 +353,8 @@ def create_iso_surface(index):
         triangles[index * 15 + (i + 1)] = vertlist[tables.triTable[cubeindex][i+1]]
         triangles[index * 15 + (i + 2)] = vertlist[tables.triTable[cubeindex][i+2]]
         i += 3
-    
-    # while tables.triTable[cube_indexes[index]][i] != -1:
-    #     triangles[numtriag].
+
+# @ti.func
 def VertexInterp(isolevel,p1,p2,valp1,valp2):
     mu = 0.0
     p = ti.Vector([0.0,0.0,0.0])
@@ -324,6 +374,7 @@ def VertexInterp(isolevel,p1,p2,valp1,valp2):
     #print(p)
     return p
 
+# @ti.kernel
 def marchingcubes():
     for i in range(0,num_cubes):
         create_iso_surface(i)
@@ -354,31 +405,44 @@ gui = window.get_gui()
 
 @ti.kernel
 def update():
+    #calc_cover_vector()
+    #neighbour_check()
     ComputeDensityPressure()
     ComputeForces()
     integrate()
     update_field()
+    #detect_surface()
     #calc_cube_index()
     #create_iso_surface()
 
 @ti.kernel
 def init():
     initialize_mass_points()
+
 @ti.kernel
 def clear_triangles():
     for i in range(0,num_cubes*15):
         triangles[i] = [0.0,0.0,0.0]
     
-
 camera.position(10,0, 100)
 camera.lookat(0.0, 0.0, 0.0)
+
+@ti.kernel
+def colour_particles():
+    for i in range(0,total_particles):
+        if boundary[i] == 1:
+            colour[i] = [0.8,0.2,0.2]
+        else:
+            colour[i] = [0.2,0.2,0.8]
+        boundary[i] = 0
+
 
 def ren():
     scene.particles(scalar_field_x, radius=0.1, color=(0.1, 0.6, 0.1))
     scene.particles(corners, radius=0.3, color=(0.5, 0.2, 0.2))
     scene.mesh(triangles, color=(0.5, 0.2, 0.2))
     #scene.mesh(cube, color=(0.5, 0.2, 0.2))
-    scene.particles(x, radius=0.3 * 0.95, color=(0.2, 0.2, 0.8))
+    scene.particles(x, radius=0.3 * 0.95, per_vertex_color=colour)
     #scene.particles(cubes, radius=0.3 * 0.95, color=(0.2, 0.2, 0.8))
     clear_triangles()
     canvas.scene(scene)
@@ -388,28 +452,6 @@ init_scalar_field()
 init_cubes()
 init()
 
-cube = ti.Vector.field(3,dtype=float,shape=(12,))
-
-ff = 340
-cube[0] = cubes[ff].corner1
-cube[1] = cubes[ff].corner2
-cube[2] = cubes[ff].corner3
-cube[3] = cubes[ff].corner1
-cube[4] = cubes[ff].corner3
-cube[5] = cubes[ff].corner4
-cube[6] = cubes[ff].corner5
-cube[7] = cubes[ff].corner6
-cube[8] = cubes[ff].corner7
-cube[9] = cubes[ff].corner5
-cube[10] = cubes[ff].corner7
-cube[11] = cubes[ff].corner8
-
-
-
-
-# triangles[0] = [20,20,0]
-# triangles[1] = [30,20,0]
-# triangles[2] = [10,30,0]
 while window.running:
     this_frame = datetime.now()
     dt = this_frame - last_frame
@@ -421,9 +463,12 @@ while window.running:
     scene.point_light(pos=(10, 10, 20), color=(1, 1, 1))
     scene.ambient_light((0.5, 0.5, 0.5))
     update()
-    marchingcubes()
+    detect_surface()
+    #print(b[10])
+    #marchingcubes()
+    #colour_particles()
+    #print(boundary[10])
     ren()
-
     #print(scalar_field[1])
     #scene.particles(scalar_field, radius=0.3 * 0.95, color=(0.5, 0.42, 0.8))
     last_frame = datetime.now()
