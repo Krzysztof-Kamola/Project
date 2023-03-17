@@ -107,7 +107,8 @@ ti.root.dense(ti.i, total_particles).place(lambdas, position_deltas)
 def poly6_value(s,h):
     result = 0.0
     if s > 0 and s < h:
-        x = (ti.pow(h,2) - ti.math.pow(s,2) / ti.pow(h,3))
+        x = (ti.pow(h,2) - ti.math.pow(s,2)) / ti.pow(h,3)
+        poly6_factor = 315.0/(64.0*ti.math.pi*ti.pow(h,9))
         result = poly6_factor * ti.pow(x,3)
     return result
 
@@ -321,7 +322,7 @@ def ren():
     # scene.particles(corners, radius=0.3, color=(0.5, 0.2, 0.2))
     # scene.mesh(triangles, color=(0.5, 0.2, 0.2))
     #scene.mesh(cube, color=(0.5, 0.2, 0.2))
-    scene.particles(positions, radius=0.3 * 0.95, color=(0.2,0.2,0.8))
+    scene.particles(positions, radius=0.2, color=(0.2,0.2,0.8))
     #scene.particles(cubes, radius=0.3 * 0.95, color=(0.2, 0.2, 0.8))
     #clear_triangles()
     canvas.scene(scene)
