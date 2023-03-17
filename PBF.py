@@ -36,8 +36,8 @@ particle_radius = 3.0
 
 #bounds
 
-left_bound = -30.0
-right_bound = 30.0
+left_bound = -15.0
+right_bound = 15.0
 bottom_bound = 0.0
 top_bound = 40.0
 back_bound = 15.0
@@ -49,10 +49,10 @@ box_depth = int(np.abs(front_bound - back_bound))
 
 #particle initial space
 
-p_left_bound = -29.0
+p_left_bound = -10.0
 p_right_bound = 10.0
 p_bottom_bound = 5.0
-p_top_bound = 25.0
+p_top_bound = 45.0
 p_back_bound = 10.0
 p_front_bound = -10.0
 
@@ -310,7 +310,7 @@ def epilouge():
     for i in positions:
         velocities[i] = (positions[i] - old_positions[i])/time_delta
 
-numIters = 6
+numIters = 7
 def PBF():
     prolouge()
     for i in range(numIters):
