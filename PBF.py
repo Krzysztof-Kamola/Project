@@ -1,4 +1,5 @@
 import taichi as ti
+import taichi_glsl as ts
 from datetime import datetime
 import numpy as np
 import math
@@ -26,8 +27,8 @@ camera.lookat(-0.2, 52.0, 166.5)
 
 dim = 3
 bg_color = 0x112f41
-particle_color = 0x068587
-boundary_color = 0xebaca2
+particle_color = ti.Vector([0.2,0.2,0.8])
+surface_color = ti.Vector([0.8,0.2,0.2])
 max_num_particles_per_cell = 100
 max_num_neighbors = 100
 time_delta = 1.0 / 20.0
@@ -37,11 +38,11 @@ particle_radius = 3.0
 #bounds
 
 left_bound = -15.0
-right_bound = 15.0
+right_bound = 30.0
 bottom_bound = 0.0
-top_bound = 40.0
-back_bound = 15.0
-front_bound = -15.0
+top_bound = 50.0
+back_bound = 10.0
+front_bound = -10.0
 
 box_width = int(np.abs(left_bound - right_bound))
 box_height = int(np.abs(bottom_bound - top_bound))
@@ -52,9 +53,9 @@ box_depth = int(np.abs(front_bound - back_bound))
 p_left_bound = -10.0
 p_right_bound = 10.0
 p_bottom_bound = 5.0
-p_top_bound = 45.0
-p_back_bound = 10.0
-p_front_bound = -10.0
+p_top_bound = 50.0
+p_back_bound = 9.0
+p_front_bound = -9.0
 
 h = 1.1
 diameter = h
@@ -69,15 +70,16 @@ print("Total number of particles: ", total_particles)
 
 v = ti.Vector.field(dim,dtype=float,shape=(total_particles,))
 
-
 mass = 1.0
 rho = 1.0
 lambda_epsilon = 100.0
-pbf_num_iters = 5
+pbf_num_iters = 7
 corr_deltaQ_coeff = 0.1
 corrK = 0.01
 gravity = ti.Vector([0.0, -9.8, 0.0])
-neighbor_radius = h * 1.05
+neighbor_radius = h * 1.1
+vorticity_eps = 0.01
+viscocity_const = 0.1
 
 poly6_factor = 315.0 / 64.0 / math.pi
 spiky_grad_factor = -45.0 / math.pi
@@ -91,6 +93,13 @@ particle_num_neighbors = ti.field(int)
 particle_neighbors = ti.field(int)
 lambdas = ti.field(float)
 position_deltas = ti.Vector.field(dim, float)
+surface = ti.field(int,shape=total_particles)
+cover_vector = ti.Vector.field(dim,dtype=float,shape=(total_particles,))
+colour = ti.Vector.field(dim,dtype=float,shape=(total_particles,))
+scorr_list = ti.field(dtype=float,shape=total_particles)
+density = ti.field(float,total_particles)
+vorticity = ti.Vector.field(dim,dtype=float, shape = total_particles)
+surface_normals = ti.Vector.field(dim,dtype=float, shape = total_particles)
 
 grid_size = (box_width,box_height,box_depth)
 
@@ -107,9 +116,13 @@ ti.root.dense(ti.i, total_particles).place(lambdas, position_deltas)
 def poly6_value(s,h):
     result = 0.0
     if s > 0 and s < h:
-        x = (ti.pow(h,2) - ti.math.pow(s,2)) / ti.pow(h,3)
+        x = ti.pow((ti.pow(h,2) - ti.pow(s,2)) / ti.pow(h,3),3)
         poly6_factor = 315.0/(64.0*ti.math.pi*ti.pow(h,9))
-        result = poly6_factor * ti.pow(x,3)
+        result = poly6_factor * x
+
+        # x = ti.pow((ti.pow(h,2) - ti.math.pow(s,2)),3)
+        # #poly6_factor = 315.0/(64.0*ti.math.pi*ti.pow(h,9))
+        # result = poly6_factor * x
     return result
 
 @ti.func
@@ -124,9 +137,12 @@ def spiky_gradient(r,h):
 
 @ti.func
 def compute_scorr(pos_ij):
-    x = poly6_value(pos_ij.norm(),h) / poly6_value(corr_deltaQ_coeff * h,h)
-    x = ti.pow(x,4)
-    result = -(corrK) * x
+    k = 0.001
+    delta_q = 0.2 * h
+    n = 4
+    x = poly6_value(pos_ij.norm(),h) / poly6_value(delta_q,h)
+    x = ti.pow(x,n)
+    result = -(k) * x
     return result
 
 @ti.func
@@ -252,6 +268,8 @@ def prolouge():
         n_i = 0
         for j in range(0,total_particles):
             if i != j and n_i < max_num_neighbors and (positions[i] - positions[j]).norm() < neighbor_radius:
+                rij = positions[i] - positions[j]
+                cover_vector[i] += ti.math.normalize(rij)
                 particle_neighbors[i,n_i] = j
                 n_i += 1
         particle_num_neighbors[i] = n_i
@@ -284,6 +302,7 @@ def substep():
         p_i = positions[i]
         lambda_i = lambdas[i]
         pos_delta_i  =ti.Vector([0.0,0.0,0.0])
+        scorr_list[i] = 0.0
         for j in range(particle_num_neighbors[i]):
             j_i = particle_neighbors[i,j]
             if j_i < 0:
@@ -292,6 +311,7 @@ def substep():
             lambda_j = lambdas[j_i]
             pos_ij = p_i - p_j
             scorr = compute_scorr(pos_ij)
+            scorr_list[i] += scorr
             pos_delta_i += (lambda_i + lambda_j + scorr) * \
                 spiky_gradient(pos_ij,h)
         
@@ -302,27 +322,127 @@ def substep():
         positions[i] += position_deltas[i]
 
 @ti.kernel
+def vorticity_confinement():
+    
+    for i in positions:
+        pos_i = positions[i]
+        vorticity[i] = pos_i * 0.0
+        for j in range(particle_num_neighbors[i]):
+            p_j = particle_neighbors[i, j]
+            if p_j < 0:
+                break
+            pos_ji = pos_i - positions[p_j]
+            vorticity[i] += mass * (velocities[p_j] - velocities[i]).cross(spiky_gradient(pos_ji, h))
+
+    for i in positions:
+        pos_i = positions[i]
+        loc_vec_i = ti.Vector([0.0,0.0,0.0])
+        for j in range(particle_num_neighbors[i]):
+            p_j = particle_neighbors[i, j]
+            if p_j < 0:
+                break
+            pos_ji = pos_i - positions[p_j]
+            loc_vec_i += mass * vorticity[p_j].norm() * spiky_gradient(pos_ji, h)
+        vorticity_i = vorticity[i]
+        # loc_vec_i += mass * omega_i.norm() * spiky_gradient(pos_i * 0.0, h) / (epsilon + density[i])
+        loc_vec_i = loc_vec_i / (epsilon + loc_vec_i.norm())
+        velocities[i] += (vorticity_eps * loc_vec_i.cross(vorticity_i))/mass * time_delta
+
+@ti.kernel
+def viscocity():
+    for i in positions:
+        p_i = positions[i]
+        v_i = velocities[i]
+        v_delta_i = ti.Vector([0.0,0.0,0.0])
+
+        for j in range(0,particle_num_neighbors[i]):
+            j_i = particle_neighbors[i,j]
+            if j_i >= 0:
+                p_j = positions[j_i]
+                v_j = velocities[j_i]
+                p_ij = p_i - p_j
+                v_ji = v_j - v_i
+                v_delta_i += v_ji * poly6_value(p_ij.norm(),h)
+        
+        velocities[i] += viscocity_const * v_delta_i
+
+@ti.kernel
+def find_surface_particles():
+    for p_i in positions:
+        pos_i = positions[p_i]
+        density = 0.0
+
+        for j in range(particle_num_neighbors[p_i]):
+            p_j = particle_neighbors[p_i, j]
+            if p_j < 0:
+                break
+            pos_ji = pos_i - positions[p_j]
+            density += poly6_value(pos_ji.norm(), h)
+
+        density = (mass * density / rho) - 1.0
+        density_threshold = 0.15
+        if (density) < density_threshold:
+            surface[p_i] = 1
+        else:
+            surface[p_i] = 0
+
+
+@ti.kernel
+def compute_surface_normals():
+    for p_i in positions:
+        if surface[p_i] == 1:  # Only compute normals for surface particles
+            pos_i = positions[p_i]
+            normal = ti.Vector([0.0, 0.0, 0.0])
+
+            for j in range(particle_num_neighbors[p_i]):
+                p_j = particle_neighbors[p_i, j]
+                if p_j < 0:
+                    break
+                pos_ji = pos_i - positions[p_j]
+                normal += spiky_gradient(pos_ji, h)
+
+            surface_normals[p_i] = normal.normalized()
+        else:
+            surface_normals[p_i] = ti.Vector([0.0, 0.0, 0.0])
+
+
+@ti.kernel
 def epilouge():
     for i in positions:
         p_i = positions[i]
         positions[i] = boundary_check(p_i)
-        #positions[i] = p_i
+        # calculate whether a particle is covered or not 
+        # for j in range(particle_num_neighbors[i]):
+        #     j_i = particle_neighbors[i,j]
+        #     rji = positions[j_i] - p_i
+        #     nrji= ti.math.normalize(rji)
+        #     theta = ti.math.pi/3
+        #     if j_i >= 0 and rji.norm() < h and ti.math.acos(nrji.dot(ti.Vector([0.0,1.0,0.0]))) < theta:
+        #         boundary[i] = 0
+                
     for i in positions:
+        if surface[i] == 0:
+            colour[i] = particle_color
+        else:
+            colour[i] = surface_color
         velocities[i] = (positions[i] - old_positions[i])/time_delta
 
-numIters = 7
+numIters = 10
 def PBF():
     prolouge()
     for i in range(numIters):
         substep()
     epilouge()
+    vorticity_confinement()
+    viscocity()
 
 def ren():
     # scene.particles(scalar_field_x, radius=0.1, color=(0.1, 0.6, 0.1))
     # scene.particles(corners, radius=0.3, color=(0.5, 0.2, 0.2))
     # scene.mesh(triangles, color=(0.5, 0.2, 0.2))
     #scene.mesh(cube, color=(0.5, 0.2, 0.2))
-    scene.particles(positions, radius=0.2, color=(0.2,0.2,0.8))
+    #ti.surfaceMaterials(scene, triangles, material)
+    scene.particles(positions, radius=0.25, per_vertex_color=colour)
     #scene.particles(cubes, radius=0.3 * 0.95, color=(0.2, 0.2, 0.8))
     #clear_triangles()
     canvas.scene(scene)
@@ -335,7 +455,7 @@ def init():
 init()
 print("Finished intializing")
 
-camera.position(-0.18,52.7, 167.5)
+camera.position(-0.18,42.7, 100.5)
 camera.lookat(0.0, 0.0, 0.0)
 while window.running:
     keyboard_handling()
@@ -345,11 +465,15 @@ while window.running:
     scene.point_light(pos=(10, 10, 20), color=(1, 1, 1))
     scene.ambient_light((0.5, 0.5, 0.5))
     PBF()
+    find_surface_particles()
     ren()
+    num = density.to_numpy()
+    max_,min_,avg= np.max(num), np.min(num), np.mean(num)
+    print("Max scorr:",max_, "Min scorr:", min_, "avg :", avg)
+
     #print(b[10])
     #marchingcubes()
     #print(boundary[10])
     #print(scalar_field[1])
     #scene.particles(scalar_field, radius=0.3 * 0.95, color=(0.5, 0.42, 0.8))
-    last_frame = datetime.now()
     #print(dt)
