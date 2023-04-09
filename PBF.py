@@ -33,7 +33,7 @@ max_num_particles_per_cell = 100
 max_num_neighbors = 100
 time_delta = 1.0 / 20.0
 epsilon = 1e-5
-particle_radius = 3.0
+particle_radius = 0.25
 
 #bounds
 
@@ -73,13 +73,18 @@ v = ti.Vector.field(dim,dtype=float,shape=(total_particles,))
 mass = 1.0
 rho = 1.0
 lambda_epsilon = 100.0
-pbf_num_iters = 7
+num_iters = 10
 corr_deltaQ_coeff = 0.1
 corrK = 0.01
 gravity = ti.Vector([0.0, -9.8, 0.0])
 neighbor_radius = h * 1.1
 vorticity_eps = 0.01
 viscocity_const = 0.1
+rV = 0.1 # volume radius of a fluid particle
+
+k_ta = 100
+k_wc = 100
+
 
 poly6_factor = 315.0 / 64.0 / math.pi
 spiky_grad_factor = -45.0 / math.pi
@@ -98,8 +103,9 @@ cover_vector = ti.Vector.field(dim,dtype=float,shape=(total_particles,))
 colour = ti.Vector.field(dim,dtype=float,shape=(total_particles,))
 scorr_list = ti.field(dtype=float,shape=total_particles)
 density = ti.field(float,total_particles)
-vorticity = ti.Vector.field(dim,dtype=float, shape = total_particles)
-surface_normals = ti.Vector.field(dim,dtype=float, shape = total_particles)
+vorticity = ti.Vector.field(dim,dtype=float, shape=total_particles)
+surface_normals = ti.Vector.field(dim,dtype=float, shape=total_particles)
+num_diffuse_particles = ti.field(dtype=int, shape=total_particles)
 
 grid_size = (box_width,box_height,box_depth)
 
@@ -144,6 +150,14 @@ def compute_scorr(pos_ij):
     x = ti.pow(x,n)
     result = -(k) * x
     return result
+
+@ti.func
+def phi(I,t_min,t_max):
+    return (ti.min(I, t_max) - ti.min(I, t_min)) / (t_max - t_min)
+
+@ti.func
+def weighting(x_ij, h):
+    return 1 - x_ij.norm() / h if x_ij.norm() <= h else 0
 
 @ti.func
 def get_cell(pos):
@@ -280,7 +294,7 @@ def substep():
         p_i = positions[i]
         grad_i = ti.Vector([0.0,0.0,0.0])
         sum_grad_sqr = 0.0
-        density_const = 0.0
+        density = 0.0
 
         for j in range(particle_num_neighbors[i]):
             j_i = particle_neighbors[i,j]
@@ -291,17 +305,17 @@ def substep():
             grad_j = spiky_gradient(pos_ij,h)
             grad_i += grad_j
             sum_grad_sqr += grad_j.dot(grad_j)
-            density_const += poly6_value(pos_ij.norm(), h)
+            density += poly6_value(pos_ij.norm(), h)
 
-        density_const = (mass * density_const/rho) - 1.0
+        density_constraint = (mass * density/rho) - 1.0
 
         sum_grad_sqr += grad_i.dot(grad_i)
-        lambdas[i] = -(density_const)/ (sum_grad_sqr + lambda_epsilon)
+        lambdas[i] = -(density_constraint)/ (sum_grad_sqr + lambda_epsilon)
     
     for i in positions:
         p_i = positions[i]
         lambda_i = lambdas[i]
-        pos_delta_i  =ti.Vector([0.0,0.0,0.0])
+        pos_delta_i = ti.Vector([0.0,0.0,0.0])
         scorr_list[i] = 0.0
         for j in range(particle_num_neighbors[i]):
             j_i = particle_neighbors[i,j]
@@ -323,7 +337,6 @@ def substep():
 
 @ti.kernel
 def vorticity_confinement():
-    
     for i in positions:
         pos_i = positions[i]
         vorticity[i] = pos_i * 0.0
@@ -405,7 +418,48 @@ def compute_surface_normals():
         else:
             surface_normals[p_i] = ti.Vector([0.0, 0.0, 0.0])
 
+# Compute the number of diffuse particles for each particle based on the paper:
+# "Unified Spray, Foam and Bubbles for Particle-Based Fluids"
 
+
+@ti.kernel
+def compute_num_diffuse_particles():
+    for p_i in positions:
+        if surface[p_i] == 1:
+            v_diff_i = 0.0
+            kappa_i = 0.0
+            for j in range(particle_num_neighbors[p_i]):
+                p_j = particle_neighbors[p_i, j]
+                if p_j < 0:
+                    break
+                if surface[p_j] == 1:
+                    pos_ij = positions[p_i] - positions[p_j]
+                    pos_ji = positions[p_j] - positions[p_i]
+                    vel_ij = velocities[p_i] - velocities[p_j]
+                    vel_n = vel_ij.normalized()
+                    pos_ij_n = pos_ij.normalized()
+                    pos_ji_n = pos_ji.normalized()
+                    # Eq 2
+                    v_diff_i += vel_ij.norm() * (1 - vel_n.dot(pos_ij_n)) * weighting(pos_ij,h)
+                    # Eq 4
+                    kappa_ij = (1 - surface_normals[p_i].dot(surface_normals[p_j])) * weighting(pos_ij, h)
+                    # Eq 6
+                    if pos_ji_n.dot(surface_normals[p_i]) < 0:
+                        kappa_i += kappa_ij
+
+            # Eq 1 for each potential 
+            I_ta = phi(v_diff_i, 0, 10)
+            v_i_n = velocities[p_i].normalized()
+            # Eq 7
+            delta_vn_i = 0 if v_i_n.dot(surface_normals[p_i]) < 0.6 else 1
+
+            I_wc = phi(kappa_i * delta_vn_i, 0, 10)
+            E_k_i = 0.5 * mass * velocities[p_i].dot(velocities[p_i])
+            I_k = phi(E_k_i, 0, 10)
+
+            # Eq 8
+            num_diffuse_particles[p_i] = I_k * ((k_ta * I_ta) + (k_wc * I_wc)) * time_delta
+ 
 @ti.kernel
 def epilouge():
     for i in positions:
@@ -435,6 +489,8 @@ def PBF():
     epilouge()
     vorticity_confinement()
     viscocity()
+    find_surface_particles()
+    compute_surface_normals()
 
 def ren():
     # scene.particles(scalar_field_x, radius=0.1, color=(0.1, 0.6, 0.1))
@@ -442,12 +498,24 @@ def ren():
     # scene.mesh(triangles, color=(0.5, 0.2, 0.2))
     #scene.mesh(cube, color=(0.5, 0.2, 0.2))
     #ti.surfaceMaterials(scene, triangles, material)
-    scene.particles(positions, radius=0.25, per_vertex_color=colour)
+    scene.particles(positions, radius=particle_radius, per_vertex_color=colour)
     #scene.particles(cubes, radius=0.3 * 0.95, color=(0.2, 0.2, 0.8))
     #clear_triangles()
     canvas.scene(scene)
     window.show()
 
+
+def simulation():
+    PBF()
+    compute_num_diffuse_particles()
+
+def cam():
+    if camera_active:
+        camera.track_user_inputs(window,movement_speed=1)
+    scene.set_camera(camera)
+    scene.point_light(pos=(10, 10, 20), color=(1, 1, 1))
+    scene.ambient_light((0.5, 0.5, 0.5))
+    
 @ti.kernel
 def init():
     initialize_mass_points()
@@ -459,15 +527,10 @@ camera.position(-0.18,42.7, 100.5)
 camera.lookat(0.0, 0.0, 0.0)
 while window.running:
     keyboard_handling()
-    if camera_active:
-        camera.track_user_inputs(window,movement_speed=1)
-    scene.set_camera(camera)
-    scene.point_light(pos=(10, 10, 20), color=(1, 1, 1))
-    scene.ambient_light((0.5, 0.5, 0.5))
-    PBF()
-    find_surface_particles()
+    cam()
+    simulation()
     ren()
-    num = density.to_numpy()
+    num = num_diffuse_particles.to_numpy()
     max_,min_,avg= np.max(num), np.min(num), np.mean(num)
     print("Max scorr:",max_, "Min scorr:", min_, "avg :", avg)
 
