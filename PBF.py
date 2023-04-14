@@ -12,9 +12,6 @@ camera_active = False
 
 bound_damping = -0.5
 
-cell_size = 2.51
-cell_recpr = 1.0 / cell_size
-
 window = ti.ui.Window("Taichi sim on GGUI", (1024, 800),vsync=True)
 canvas = window.get_canvas()
 canvas.set_background_color((1, 1, 1))
@@ -29,20 +26,21 @@ dim = 3
 bg_color = 0x112f41
 particle_color = ti.Vector([0.2,0.2,0.8])
 surface_color = ti.Vector([0.8,0.2,0.2])
+diffuse_color = ti.Vector([1.0,1.0,1.0])
 max_num_particles_per_cell = 100
 max_num_neighbors = 100
-time_delta = 1.0 / 20.0
+dt = 1.0 / 60.0
 epsilon = 1e-5
 particle_radius = 0.25
 
 #bounds
 
-left_bound = -15.0
+left_bound = 0.0
 right_bound = 30.0
 bottom_bound = 0.0
-top_bound = 50.0
-back_bound = 10.0
-front_bound = -10.0
+top_bound = 40.0
+back_bound = 30.0
+front_bound = 0.0
 
 box_width = int(np.abs(left_bound - right_bound))
 box_height = int(np.abs(bottom_bound - top_bound))
@@ -50,15 +48,15 @@ box_depth = int(np.abs(front_bound - back_bound))
 
 #particle initial space
 
-p_left_bound = -10.0
-p_right_bound = 10.0
-p_bottom_bound = 5.0
-p_top_bound = 50.0
-p_back_bound = 9.0
-p_front_bound = -9.0
+p_left_bound =  0.0
+p_right_bound = 20.0
+p_bottom_bound = 0.0
+p_top_bound = 20.0
+p_back_bound = 20.0
+p_front_bound = 0.0
 
 h = 1.1
-diameter = h
+diameter = h * 0.6
 
 num_paticles_x = int(np.abs(p_left_bound - p_right_bound) / diameter)
 num_paticles_y = int(np.abs(p_bottom_bound - p_top_bound) / diameter)
@@ -67,6 +65,18 @@ num_paticles_z = int(np.abs(p_front_bound - p_back_bound) / diameter)
 total_particles = int(num_paticles_x*num_paticles_y*num_paticles_z)
 
 print("Total number of particles: ", total_particles)
+
+neighbor_radius = h * 1.1
+cell_size = 2 * neighbor_radius
+cell_recpr = 1.0 / cell_size
+
+num_cells_x = int(np.abs(left_bound - right_bound) / cell_size)
+num_cells_y = int(np.abs(bottom_bound - top_bound) / cell_size)
+num_cells_z = int(np.abs(front_bound - back_bound) / cell_size)
+
+num_cells = int(num_cells_x*num_cells_y*num_cells_z)
+
+print("Number of cells: ", num_cells)
 
 v = ti.Vector.field(dim,dtype=float,shape=(total_particles,))
 
@@ -80,14 +90,29 @@ gravity = ti.Vector([0.0, -9.8, 0.0])
 neighbor_radius = h * 1.1
 vorticity_eps = 0.01
 viscocity_const = 0.1
-rV = 0.1 # volume radius of a fluid particle
+rV = h # volume radius of a fluid particle
+density_threshold = 0.02 # Used for find surface particles
 
-k_ta = 100
-k_wc = 100
-
+k_ta = 50.0
+k_wc = 50.0
 
 poly6_factor = 315.0 / 64.0 / math.pi
 spiky_grad_factor = -45.0 / math.pi
+max_diffuse_particles = total_particles * 100
+# Simulation data
+diffuse_particles = ti.Struct.field({
+    "pos": ti.math.vec3,
+    "vel": ti.math.vec3,
+    "lifespan": float,
+    "active": int,
+  }, shape=(max_diffuse_particles,))
+
+diffuse_particles_copy = ti.Struct.field({
+    "pos": ti.math.vec3,
+    "vel": ti.math.vec3,
+    "lifespan": float,
+    "active": int,
+  }, shape=(max_diffuse_particles,))
 
 old_positions = ti.Vector.field(dim, float)
 positions = ti.Vector.field(dim, float)
@@ -106,6 +131,12 @@ density = ti.field(float,total_particles)
 vorticity = ti.Vector.field(dim,dtype=float, shape=total_particles)
 surface_normals = ti.Vector.field(dim,dtype=float, shape=total_particles)
 num_diffuse_particles = ti.field(dtype=int, shape=total_particles)
+grid_cells_x = ti.Vector.field(dim,dtype=float,shape=(num_cells,))
+diffuse_positions = ti.Vector.field(dim,float)
+# diffuse_velocities = ti.Vector.field(dim,float)
+# diffuse_lifetime = ti.field(dtype=float,shape=max_diffuse_particles)
+# diffuse_active = ti.field(dtype=int,shape=max_diffuse_particles)
+diffuse_count = ti.field(dtype=int,shape=1)
 
 grid_size = (box_width,box_height,box_depth)
 
@@ -117,6 +148,8 @@ nb_node = ti.root.dense(ti.i, total_particles)
 nb_node.place(particle_num_neighbors)
 nb_node.dense(ti.j, max_num_neighbors).place(particle_neighbors)
 ti.root.dense(ti.i, total_particles).place(lambdas, position_deltas)
+ti.root.dense(ti.i, max_diffuse_particles).place(diffuse_positions)
+ 
 
 @ti.func
 def poly6_value(s,h):
@@ -160,13 +193,18 @@ def weighting(x_ij, h):
     return 1 - x_ij.norm() / h if x_ij.norm() <= h else 0
 
 @ti.func
-def get_cell(pos):
-    return int(pos * cell_recpr)
-
-@ti.func
 def is_in_grid(c):
-    return 0 <= c[0] and c[0] < grid_size[0] and 0 <= c[1] and c[
-        1] < grid_size[1] and 0 <= c[2] and c[2] < grid_size[2]
+    return left_bound <= c[0] and c[0] < right_bound and bottom_bound <= c[1] and c[1] < top_bound and front_bound <= c[2] and c[2] < back_bound
+
+# @ti.func
+# def get_cell(pos):
+#     x_i = ti.floor(pos[0]/cell_size)
+#     y_i = ti.floor(pos[1]/cell_size)
+#     z_i = ti.floor(pos[2]/cell_size)
+#     index = int((x_i*num_cells_y + y_i) * num_cells_z + z_i)
+#     return index
+
+
 
 @ti.kernel
 def init_cubes():
@@ -218,7 +256,8 @@ def initialize_mass_points():
                 positions[index] = [(i*diameter + p_left_bound) + ti.random() / 10,
                  j*diameter + p_bottom_bound,
                  k*diameter + p_front_bound + ti.random() / 10]
-                v[index] = [0.0,0.0,0.0]
+                velocities[index] = [0.0,0.0,0.0]
+
 
 def keyboard_handling():
     global camera_active
@@ -244,49 +283,77 @@ def boundary_check(pos):
         pos[2] = front_bound
     return pos
 
-@ti.kernel
-def prolouge():
-    # save old particle positions
+@ti.func
+def get_cell(pos):
+    return int(ti.floor(pos / cell_size))
+
+@ti.func
+def set_grid():
+    grid_num_particles.fill(0)
+    particle_neighbors.fill(-1)
+    particle_num_neighbors.fill(0)
+
+    for i in positions:
+        cell = get_cell(positions[i])
+        offs = ti.atomic_add(grid_num_particles[cell], 1)
+        grid2particles[cell, offs] = i
+
+    for p_i in positions:
+        pos_i = positions[p_i]
+        cell = get_cell(pos_i)
+        nb_i = 0
+        for offs in ti.static(ti.grouped(ti.ndrange((-1, 2), (-1, 2), (-1, 2)))):
+            cell_to_check = cell + offs
+            if is_in_grid(cell_to_check):
+                for j in range(grid_num_particles[cell_to_check]):
+                    p_j = grid2particles[cell_to_check, j]
+                    if nb_i < max_num_neighbors and p_j != p_i and (
+                            pos_i - positions[p_j]).norm() < neighbor_radius:
+                        particle_neighbors[p_i, nb_i] = p_j
+                        nb_i += 1
+        particle_num_neighbors[p_i] = nb_i
+
+@ti.func
+def init_cells():
+    for i in range(0,num_cells_x-1):
+        for j in range(0,num_cells_y-1):
+            for k in range(0,num_cells_z-1):
+                index = int((k* (num_cells_x-1) * (num_cells_y-1)) + (j * (num_cells_x-1)) + i)
+                #index2 = int((k* num_points_x * num_points_y) + (j * num_points_x) + i)
+                grid_cells_x[index] = [(i*grid_size + p_left_bound),
+                 j*grid_size + p_bottom_bound,
+                 k*grid_size + p_front_bound]
+                
+@ti.func
+def save_old_positions():
     for i in positions:
         old_positions[i] = positions[i]
 
-    # apply external forces to particle and update positions
+@ti.func
+def apply_forces():
     for i in positions:
         pos = positions[i]
         vel = velocities[i]
-        vel += gravity * time_delta
-        pos += vel * time_delta
+        vel += gravity * dt
+        pos += vel * dt
         positions[i] = boundary_check(pos)
-        #positions[i] = pos
 
-    # clear the particles stored neighbours and num particles in cell
-    for i in ti.grouped(grid_num_particles):
-        grid_num_particles[i] = 0
-    for i in ti.grouped(particle_neighbors):
-        particle_neighbors[i] = -1
-
-    # set particle to appropriate cell
-    # for i in positions:
-    #     cell = get_cell(position_deltas[i])
-    #     offs = ti.atomic_add(grid_num_particles[cell], 1)
-    #     grid2particles[cell, offs] = i
-    
-    # for i in positions:
-    #     p_i = positions[i]
-    #     cell = get_cell(p_i)
-    #     for offs in ti.static(ti.grouped(ti.ndrange((-1,2),(-1,2),(-1,2)))):
-    #         cell_to_check = cell + offs
+@ti.kernel
+def PBF_first_step():
+    save_old_positions()
+    apply_forces()
+    set_grid()
 
     # find a particels neighbours
-    for i in positions:
-        n_i = 0
-        for j in range(0,total_particles):
-            if i != j and n_i < max_num_neighbors and (positions[i] - positions[j]).norm() < neighbor_radius:
-                rij = positions[i] - positions[j]
-                cover_vector[i] += ti.math.normalize(rij)
-                particle_neighbors[i,n_i] = j
-                n_i += 1
-        particle_num_neighbors[i] = n_i
+    # for i in positions:
+    #     n_i = 0
+    #     for j in range(0,total_particles):
+    #         if i != j and n_i < max_num_neighbors and (positions[i] - positions[j]).norm() < neighbor_radius:
+    #             rij = positions[i] - positions[j]
+    #             cover_vector[i] += ti.math.normalize(rij)
+    #             particle_neighbors[i,n_i] = j
+    #             n_i += 1
+    #     particle_num_neighbors[i] = n_i
 
 @ti.kernel
 def substep():
@@ -359,7 +426,7 @@ def vorticity_confinement():
         vorticity_i = vorticity[i]
         # loc_vec_i += mass * omega_i.norm() * spiky_gradient(pos_i * 0.0, h) / (epsilon + density[i])
         loc_vec_i = loc_vec_i / (epsilon + loc_vec_i.norm())
-        velocities[i] += (vorticity_eps * loc_vec_i.cross(vorticity_i))/mass * time_delta
+        velocities[i] += (vorticity_eps * loc_vec_i.cross(vorticity_i))/mass * dt
 
 @ti.kernel
 def viscocity():
@@ -393,7 +460,6 @@ def find_surface_particles():
             density += poly6_value(pos_ji.norm(), h)
 
         density = (mass * density / rho) - 1.0
-        density_threshold = 0.15
         if (density) < density_threshold:
             surface[p_i] = 1
         else:
@@ -418,10 +484,34 @@ def compute_surface_normals():
         else:
             surface_normals[p_i] = ti.Vector([0.0, 0.0, 0.0])
 
-# Compute the number of diffuse particles for each particle based on the paper:
-# "Unified Spray, Foam and Bubbles for Particle-Based Fluids"
+@ti.kernel
+def epilouge():
+    for i in positions:
+        p_i = positions[i]
+        positions[i] = boundary_check(p_i)
+                
+    for i in positions:
+        if surface[i] == 0:
+            colour[i] = particle_color
+        else:
+            colour[i] = surface_color
+        velocities[i] = (positions[i] - old_positions[i])/dt
+
+numIters = 10
+def PBF():
+    PBF_first_step()
+    for i in range(numIters):
+        substep()
+    epilouge()
+    vorticity_confinement()
+    viscocity()
+    find_surface_particles()
+    compute_surface_normals()
 
 
+# Diffuse particle code
+# Based on the paper:
+# "Unified Spray, Foam and Bubbles for Particle-Based Fluids" by Markus Ihmsen et al.
 @ti.kernel
 def compute_num_diffuse_particles():
     for p_i in positions:
@@ -448,66 +538,106 @@ def compute_num_diffuse_particles():
                         kappa_i += kappa_ij
 
             # Eq 1 for each potential 
-            I_ta = phi(v_diff_i, 0, 10)
+            I_ta = phi(v_diff_i, 2, 8)
             v_i_n = velocities[p_i].normalized()
             # Eq 7
             delta_vn_i = 0 if v_i_n.dot(surface_normals[p_i]) < 0.6 else 1
 
-            I_wc = phi(kappa_i * delta_vn_i, 0, 10)
+            I_wc = phi(kappa_i * delta_vn_i, 5, 20)
             E_k_i = 0.5 * mass * velocities[p_i].dot(velocities[p_i])
-            I_k = phi(E_k_i, 0, 10)
+            I_k = phi(E_k_i, 5, 50)
 
             # Eq 8
-            num_diffuse_particles[p_i] = I_k * ((k_ta * I_ta) + (k_wc * I_wc)) * time_delta
- 
-@ti.kernel
-def epilouge():
-    for i in positions:
-        p_i = positions[i]
-        positions[i] = boundary_check(p_i)
-        # calculate whether a particle is covered or not 
-        # for j in range(particle_num_neighbors[i]):
-        #     j_i = particle_neighbors[i,j]
-        #     rji = positions[j_i] - p_i
-        #     nrji= ti.math.normalize(rji)
-        #     theta = ti.math.pi/3
-        #     if j_i >= 0 and rji.norm() < h and ti.math.acos(nrji.dot(ti.Vector([0.0,1.0,0.0]))) < theta:
-        #         boundary[i] = 0
-                
-    for i in positions:
-        if surface[i] == 0:
-            colour[i] = particle_color
-        else:
-            colour[i] = surface_color
-        velocities[i] = (positions[i] - old_positions[i])/time_delta
+            num_diffuse_particles[p_i] = int(I_k * ((k_ta * I_ta) + (k_wc * I_wc)) * dt)
 
-numIters = 10
-def PBF():
-    prolouge()
-    for i in range(numIters):
-        substep()
-    epilouge()
-    vorticity_confinement()
-    viscocity()
-    find_surface_particles()
-    compute_surface_normals()
+@ti.kernel
+def gen_diffuse_particles():
+    for p_i in positions:
+        for i in range(num_diffuse_particles[p_i]):
+            if diffuse_count[0] < max_diffuse_particles:
+                index = ti.atomic_add(diffuse_count[0], 1)
+                X_r = ti.random()
+                X_theta = ti.random()
+                X_h = ti.random()
+                vel = velocities[p_i]
+                pos = positions[p_i]
+                # Compute the radial distance, azimuth, and height within the cylinder
+                r = rV * ti.sqrt(X_r)
+                theta = X_theta * 2 * ti.pi
+                h = X_h * (vel * dt).norm()
+
+                # Compute the orthogonal basis for the reference plane
+                e1_prime = ti.Vector([0, 0, 0])
+                e2_prime = ti.Vector([0, 0, 0])
+                if vel.norm() > 0:
+                    e1_prime = ti.Vector([vel[1], -vel[0], 0]).normalized()
+                    e2_prime = vel.cross(e1_prime).normalized()
+
+                # Compute the position and velocity of the diffuse particle
+                diffuse_particles[index].pos = pos + (r * ti.cos(theta) * e1_prime) + (r * ti.sin(theta) * e2_prime) + (h * vel.normalized())
+                diffuse_particles[index].vel = (r * ti.cos(theta) * e1_prime) + (r * ti.sin(theta) * e2_prime) + vel
+                diffuse_particles[index].lifespan = 10.0
+                diffuse_particles[index].active = 1
+
+@ti.kernel
+def dissolution():
+    for i in range(diffuse_count[0]):
+        diffuse_particles[i].lifespan -= dt
+        if diffuse_particles.lifespan[i] <= 0:
+            diffuse_particles[i].pos = ti.Vector([0.0, 0.0, 0.0])
+            diffuse_particles[i].vel = ti.Vector([0.0, 0.0, 0.0])
+            diffuse_particles[i].lifespan = 0.0
+            diffuse_particles[i].active = 0
+    
+@ti.kernel
+def squash_array():
+    count = 0
+    for i in range(diffuse_count[0]):
+        if diffuse_particles[i].active == 0:
+            diffuse_particles[i] = diffuse_particles_copy[diffuse_count[0]+1]
+            ti.atomic_add(count,1)
+    diffuse_count[0] -= count
+
+@ti.kernel
+def move_diffuse_particles():
+    for i in range(diffuse_count[0]):
+        if diffuse_particles.active[i] == 1:
+            diffuse_particles[i].vel += gravity * dt
+            diffuse_particles[i].pos += diffuse_particles[i].vel * dt
+            diffuse_particles[i].pos = boundary_check(diffuse_particles[i].pos)
+    num_diffuse_particles.fill(0)
+
+def dissolution_full():
+    dissolution()
+    diffuse_particles_copy.pos.copy_from(diffuse_particles.pos)
+    diffuse_particles_copy.vel.copy_from(diffuse_particles.vel)
+    diffuse_particles_copy.lifespan.copy_from(diffuse_particles.lifespan)
+    diffuse_particles_copy.active.copy_from(diffuse_particles.active)
+    squash_array()
+
+def diffuse():
+    move_diffuse_particles()
+    compute_num_diffuse_particles()
+    gen_diffuse_particles()
+    dissolution_full()
 
 def ren():
-    # scene.particles(scalar_field_x, radius=0.1, color=(0.1, 0.6, 0.1))
+    #diffuse_positions.copy_from(diffuse_particles.pos)
+    #scene.particles(grid_cells_x, radius=0.5, color=(0.1, 0.6, 0.1))
     # scene.particles(corners, radius=0.3, color=(0.5, 0.2, 0.2))
     # scene.mesh(triangles, color=(0.5, 0.2, 0.2))
     #scene.mesh(cube, color=(0.5, 0.2, 0.2))
     #ti.surfaceMaterials(scene, triangles, material)
     scene.particles(positions, radius=particle_radius, per_vertex_color=colour)
+    #scene.particles(diffuse_positions, radius=particle_radius*0.5, color=(1.0,1.0,1.0),index_count=diffuse_count[0])
     #scene.particles(cubes, radius=0.3 * 0.95, color=(0.2, 0.2, 0.8))
     #clear_triangles()
     canvas.scene(scene)
     window.show()
 
-
 def simulation():
     PBF()
-    compute_num_diffuse_particles()
+    #diffuse()
 
 def cam():
     if camera_active:
@@ -515,10 +645,11 @@ def cam():
     scene.set_camera(camera)
     scene.point_light(pos=(10, 10, 20), color=(1, 1, 1))
     scene.ambient_light((0.5, 0.5, 0.5))
-    
+
 @ti.kernel
 def init():
     initialize_mass_points()
+    #init_cells()
 
 init()
 print("Finished intializing")
@@ -528,13 +659,17 @@ camera.lookat(0.0, 0.0, 0.0)
 while window.running:
     keyboard_handling()
     cam()
-    simulation()
-    ren()
-    num = num_diffuse_particles.to_numpy()
-    max_,min_,avg= np.max(num), np.min(num), np.mean(num)
-    print("Max scorr:",max_, "Min scorr:", min_, "avg :", avg)
 
-    #print(b[10])
+    simulation()
+
+    # print("Num diffuse:",diffuse_count[0])
+
+    ren()
+
+    num = num_diffuse_particles.to_numpy()
+    #max_,min_,avg= np.max(num), np.min(num), np.mean(num)
+    #print("Max scorr:",max_, "Min scorr:", min_, "avg :", avg)
+
     #marchingcubes()
     #print(boundary[10])
     #print(scalar_field[1])
