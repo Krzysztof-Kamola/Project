@@ -36,10 +36,10 @@ particle_radius = 0.25
 #bounds
 
 left_bound = 0.0
-right_bound = 15.0
+right_bound = 20.0
 bottom_bound = 0.0
 top_bound = 40.0
-back_bound = 15.0
+back_bound = 20.0
 front_bound = 0.0
 
 origin = ti.Vector([left_bound, bottom_bound, front_bound])
@@ -53,7 +53,7 @@ box_depth = int(np.abs(front_bound - back_bound))
 p_left_bound =  0.0
 p_right_bound = 10.0
 p_bottom_bound = 0.0
-p_top_bound = 10.0
+p_top_bound = 30.0
 p_back_bound = 10.0
 p_front_bound = 0.0
 
@@ -93,6 +93,8 @@ vorticity_eps = 0.01
 viscocity_const = 0.1
 rV = h # volume radius of a fluid particle
 density_threshold = 0.02 # Used for find surface particles
+drag = 0.1
+buoyancy = 0.9
 
 k_ta = 100.0
 k_wc = 100.0
@@ -107,6 +109,7 @@ diffuse_particles = ti.Struct.field({
     "vel": ti.math.vec3,
     "lifespan": float,
     "active": int,
+    "type": int,
   }, shape=(max_diffuse_particles,))
 
 diffuse_particles_copy = ti.Struct.field({
@@ -114,6 +117,7 @@ diffuse_particles_copy = ti.Struct.field({
     "vel": ti.math.vec3,
     "lifespan": float,
     "active": int,
+    "type": int,
   }, shape=(max_diffuse_particles,))
 
 old_positions = ti.Vector.field(dim, float)
@@ -206,17 +210,19 @@ def weighting(x_ij, h):
     return 1 - x_ij.norm() / h if x_ij.norm() <= h else 0
 
 @ti.func
+def cubic_spline(x, h):
+    q = x.norm() / h
+    coeff = 1 / (ti.pi * h * h * h)
+    result = 0.0
+    if q <= 1 and q >= 0:
+        result = coeff * (1 - (1.5 * q * q) + (0.75 * q * q * q))
+    elif q <= 2 and q >= 1:
+        result = coeff * 0.25 * ti.pow(2 - q,3)
+    return result
+
+@ti.func
 def is_in_grid(c):
     return left_bound <= c[0] and c[0] < right_bound and bottom_bound <= c[1] and c[1] < top_bound and front_bound <= c[2] and c[2] < back_bound
-
-# @ti.func
-# def get_cell(pos):
-#     x_i = ti.floor(pos[0]/cell_size)
-#     y_i = ti.floor(pos[1]/cell_size)
-#     z_i = ti.floor(pos[2]/cell_size)
-#     index = int((x_i*num_cells_y + y_i) * num_cells_z + z_i)
-#     return index
-
 
 
 @ti.kernel
@@ -327,9 +333,37 @@ def set_grid():
         particle_num_neighbors[p_i] = nb_i
 
 
+
+
+    # for i in range(max_diffuse_particles):
+    #     diffuse_num_neighbors[i] = 0
+    #     for j in range(max_num_neighbors):
+    #         diffuse_neighbors[i,j] = -1
+
+    # for p_i in range(max_diffuse_particles):
+    #     if(diffuse_particles[p_i].active == 1):
+    #         pos_i = diffuse_particles[p_i].pos
+    #         cell = get_cell(pos_i)
+    #         nb_i = 0
+    #         for offs in ti.static(ti.grouped(ti.ndrange((-1, 2), (-1, 2), (-1, 2)))):
+    #             cell_to_check = cell + offs
+    #             if is_in_grid(cell_to_check):
+    #                 for j in range(grid_num_particles[cell_to_check]):
+    #                     p_j = grid2particles[cell_to_check, j]
+    #                     if nb_i < max_num_neighbors and (
+    #                             pos_i - positions[p_j]).norm() < neighbor_radius:
+    #                         diffuse_neighbors[p_i, nb_i] = p_j
+    #                         nb_i += 1
+    #         diffuse_num_neighbors[p_i] = nb_i
+
     # grid_num_particles.fill(0)
     # particle_neighbors.fill(-1)
     # particle_num_neighbors.fill(0)
+
+    # for i in range(max_diffuse_particles):
+    #     diffuse_num_neighbors[i] = 0
+    #     for j in range(max_num_neighbors):
+    #         diffuse_neighbors[i,j] = -1
 
     # count = 0
     # cell = ti.Vector([0,0,0])
@@ -349,11 +383,6 @@ def set_grid():
     #         cell = get_cell(positions[i])
     #         offs = ti.atomic_add(grid_num_particles[cell], 1)
     #         grid2particles[cell, offs] = i
-
-    #     if i < diffuse_count[0]:
-    #         cell = get_cell(diffuse_particles.pos[i])
-    #         offs = ti.atomic_add(grid_num_diffuse[cell], 1)
-    #         grid2diffuse[cell, offs] = i
 
     # for p_i in range(count):
     #     if p_i < total_particles:
@@ -578,7 +607,7 @@ def epilouge():
         if surface[i] == 0:
             colour[i] = particle_color
         else:
-            colour[i] = surface_color
+            colour[i] = particle_color
         velocities[i] = (positions[i] - old_positions[i])/dt
 
 numIters = 10
@@ -659,7 +688,7 @@ def gen_diffuse_particles():
                     e2_prime = vel.cross(e1_prime).normalized()
 
                 # Compute the position and velocity of the diffuse particle
-                diffuse_particles[index].pos = pos + (r * ti.cos(theta) * e1_prime) + (r * ti.sin(theta) * e2_prime) + (h * vel.normalized())
+                diffuse_particles[index].pos = boundary_check(pos + (r * ti.cos(theta) * e1_prime) + (r * ti.sin(theta) * e2_prime) + (h * vel.normalized()))
                 diffuse_particles[index].vel = (r * ti.cos(theta) * e1_prime) + (r * ti.sin(theta) * e2_prime) + vel
                 diffuse_particles[index].lifespan = 10.0
                 diffuse_particles[index].active = 1
@@ -667,12 +696,13 @@ def gen_diffuse_particles():
 @ti.kernel
 def dissolution():
     for i in range(diffuse_count[0]):
-        diffuse_particles[i].lifespan -= dt
-        if diffuse_particles.lifespan[i] <= 0:
-            diffuse_particles[i].pos = ti.Vector([0.0, 0.0, 0.0])
-            diffuse_particles[i].vel = ti.Vector([0.0, 0.0, 0.0])
-            diffuse_particles[i].lifespan = 0.0
-            diffuse_particles[i].active = 0
+        if diffuse_particles[i].active == 1 and diffuse_particles[i].type == 2:
+            diffuse_particles[i].lifespan -= dt
+            if diffuse_particles.lifespan[i] <= 0:
+                diffuse_particles[i].pos = ti.Vector([0.0, 0.0, 0.0])
+                diffuse_particles[i].vel = ti.Vector([0.0, 0.0, 0.0])
+                diffuse_particles[i].lifespan = 0.0
+                diffuse_particles[i].active = 0
     
 @ti.kernel
 def squash_array():
@@ -742,7 +772,33 @@ def find_diffuse_neighbours():
                 diffuse_neighbors[p_i, nb_i] = p_j
                 nb_i += 1
         diffuse_num_neighbors[p_i] = nb_i
-                                
+
+@ti.func
+def compute_density_diffuse():
+    for p_i in range(diffuse_count[0]):
+        pos_i = diffuse_particles[p_i].pos
+        density = 0.0
+
+        for j in range(diffuse_num_neighbors[p_i]):
+            p_j = diffuse_neighbors[p_i, j]
+            if p_j < 0:
+                break
+            # density += densities[p_j]
+            pos_ji = pos_i - positions[p_j]
+            density += poly6_value(pos_ji.norm(), h)
+
+        density = (mass * density / rho) - 1.0
+        # if diffuse_num_neighbors[p_i] > 0:
+        #     density /= diffuse_num_neighbors[p_i]
+        # else:
+        #     density = 0.0
+        if density < density_threshold - 0.01:
+            diffuse_particles[p_i].type = 1
+        elif density > 0.02:
+            diffuse_particles[p_i].type = 3
+        else:
+            diffuse_particles[p_i].type = 2
+
 
 @ti.kernel
 def advect_particles():
@@ -754,57 +810,70 @@ def advect_particles():
     for p_i in range(max_diffuse_particles):
         if(diffuse_particles[p_i].active == 1):
             pos_i = diffuse_particles[p_i].pos
+            cell = get_cell(pos_i)
             nb_i = 0
-            for p_j in range(total_particles):
-                if nb_i < max_num_neighbors and (
-                        pos_i - positions[p_j]).norm() < neighbor_radius:
-                    diffuse_neighbors[p_i, nb_i] = p_j
-                    nb_i += 1
+            for offs in ti.static(ti.grouped(ti.ndrange((-1, 2), (-1, 2), (-1, 2)))):
+                cell_to_check = cell + offs
+                if is_in_grid(cell_to_check):
+                    for j in range(grid_num_particles[cell_to_check]):
+                        p_j = grid2particles[cell_to_check, j]
+                        if nb_i < max_num_neighbors and (
+                                pos_i - positions[p_j]).norm() < neighbor_radius:
+                            diffuse_neighbors[p_i, nb_i] = p_j
+                            nb_i += 1
             diffuse_num_neighbors[p_i] = nb_i
             if nb_i > 20:
-                pass
-            elif nb_i < 10:
-                pass
+                # bubble
+                diffuse_particles[p_i].type = 3
+            elif nb_i < 6:
+                # spray
+                diffuse_particles[p_i].type = 1
             else:
-                pass
+                # foam
+                diffuse_particles[p_i].type = 2
+    compute_density_diffuse()
 
+    for i in range(max_diffuse_particles):
+        if diffuse_particles[i].active == 1:
+            # Advection for spray particles. Simple ballistic motion
+            if diffuse_particles[i].type == 1:
+                diffuse_particles[i].vel += gravity * dt
+                diffuse_particles[i].pos += diffuse_particles[i].vel * dt
+                diffuse_particles[i].pos = boundary_check(diffuse_particles[i].pos)
+            else:
+                avg_fluid_vel = ti.Vector([0.0, 0.0, 0.0])
+                denom = 0.0
+                for p_j in range(diffuse_num_neighbors[i]):
+                    j = diffuse_neighbors[i,p_j]
+                    pos_i = diffuse_particles[i].pos
+                    pos_j = positions[j]
+                    vel_j = velocities[j]
 
-    
+                    avg_fluid_vel += vel_j * cubic_spline(pos_i - pos_j, h)
+                    denom += cubic_spline(pos_i - pos_j, h)
+                if denom > 0.0:
+                    avg_fluid_vel /= denom
+                else:
+                    avg_fluid_vel = ti.Vector([0.0, 0.0, 0.0])
 
-    for i in range(diffuse_count[0]):
-        # Advection for spray particles. Simple ballistic motion
-        if True:
-            diffuse_particles[i].vel += gravity * dt
-            diffuse_particles[i].pos += diffuse_particles[i].vel * dt
-            diffuse_particles[i].pos = boundary_check(diffuse_particles[i].pos)
-        else:
-            sum_fluid_vel = ti.Vector([0.0, 0.0, 0.0])
-            for j in range(diffuse_num_neighbors[i]):
-                j = diffuse_neighbors[i,j]
-                pos_i = diffuse_particles[i].pos
-                pos_j = positions[j]
-                vel_j = velocities[j]
+                # Advection for foam particles
+                if diffuse_particles[i].type == 2:
+                    # Calculate velocity of foam. Average velocity of surrounding fluid particles
+                    # v_new = (Sum (fluid vel(t + dt) * W(diffuse pos - fluid pos, h)) /
+                    # (Sum (W(diffuse pos - fluid pos, h)))
+                    diffuse_particles[i].vel = avg_fluid_vel
+                    diffuse_particles[i].pos = boundary_check(diffuse_particles[i].pos + (dt * avg_fluid_vel))
 
-                avg_fluid_vel += vel_j * K(pos_i - pos_j, h)
-                denom += K(pos_i - pos_j, h)
-            avg_fluid_vel /= denom
-
-            # Advection for foam particles
-            if False:
-                # Calculate velocity of foam. Average velocity of surrounding fluid particles
-                # v_new = (Sum (fluid vel(t + dt) * W(diffuse pos - fluid pos, h)) /
-                # (Sum (W(diffuse pos - fluid pos, h)))
-
-                diffuse_particles[i].pos = diffuse_particles[i].pos + (dt * avg_fluid_vel)
-
-            # Advection for bubbles
-            if False:
-                # find velocity of bubble
-                # diffuse vel + dt * (-buoyancy*gravity + drag*((v_new - bubble vel)/dt))
-                v_bub = diffuse_particles[i].vel + (dt * (-buoyancy * gravity + drag * ((avg_fluid_vel - diffuse_particles[i].vel) / dt)))
-                diffuse_particles[i].pos = diffuse_particles[i].pos + (dt * v_bub)
-                pass
-    
+                # Advection for bubbles
+                if diffuse_particles[i].type == 3:
+                    # find velocity of bubble
+                    # diffuse vel + dt * (-buoyancy*gravity + drag*((v_new - bubble vel)/dt))
+                    drag = 0.4
+                    buoyancy = 0.9
+                    # v_bub = diffuse_particles[i].vel + (((buoyancy * ti.Vector([0.0,9.8,0.0])) + (drag * ((avg_fluid_vel - diffuse_particles[i].vel) / dt))))
+                    diffuse_particles[i].vel = diffuse_particles[i].vel + dt * (buoyancy * ti.Vector([0.0, 9.8, 0.0]) + (drag * ((avg_fluid_vel - diffuse_particles[i].vel) / dt)))
+                    diffuse_particles[i].pos = boundary_check(diffuse_particles[i].pos + (dt * diffuse_particles[i].vel))
+        
     num_diffuse_particles.fill(0)
 
 def dissolution_full():
@@ -813,16 +882,16 @@ def dissolution_full():
     diffuse_particles_copy.vel.copy_from(diffuse_particles.vel)
     diffuse_particles_copy.lifespan.copy_from(diffuse_particles.lifespan)
     diffuse_particles_copy.active.copy_from(diffuse_particles.active)
+    diffuse_particles_copy.type.copy_from(diffuse_particles.type)
     squash_array()
 
 def diffuse():
-    advect_particles()
     compute_num_diffuse_particles()
     gen_diffuse_particles()
+    advect_particles()
     dissolution_full()
 
 def ren():
-    diffuse_positions.copy_from(diffuse_particles.pos)
     #scene.particles(grid_cells_x, radius=0.5, color=(0.1, 0.6, 0.1))
     # scene.particles(corners, radius=0.3, color=(0.5, 0.2, 0.2))
     # scene.mesh(triangles, color=(0.5, 0.2, 0.2))
@@ -874,7 +943,7 @@ while window.running:
 
     if frame % 20 == 0:
         print("Frame:", frame)
-        num = diffuse_num_neighbors.to_numpy()
+        num = densities.to_numpy()
         max_,min_,avg= np.max(num), np.min(num), np.mean(num)
         print("Max neighbours:",max_, "Min neighbours:", min_, "avg :", avg)
         print("Num diffuse:",diffuse_count[0])
