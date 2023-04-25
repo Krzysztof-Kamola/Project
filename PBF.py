@@ -133,7 +133,7 @@ class Simulator:
         self.lambdas = ti.field(float)
         self.position_deltas = ti.Vector.field(self.dim, float)
         self.surface = ti.field(int,shape=self.max_particles)
-        self.cover_vector = ti.Vector.field(self.dim,dtype=float,shape=(self.max_particles,))
+        #self.cover_vector = ti.Vector.field(self.dim,dtype=float,shape=(self.max_particles,))
         self.colour = ti.Vector.field(self.dim,dtype=float,shape=(self.max_particles,))
         self.scorr_list = ti.field(dtype=float,shape=self.max_particles)
         self.density = ti.field(float,self.max_particles)
@@ -157,17 +157,15 @@ class Simulator:
 
         #scalar_size = (box_width,box_height,box_depth)
         self.cell_size = 2*self.neighbor_radius
-        self.cube_size = self.h/2
+        # self.cube_size = self.h/2
 
         def round_up(f, s, c):
             return (math.floor(f * (1/c) / s) + 1) * s
 
         print("Box size:",self.box_width,self.box_height,self.box_depth)
         self.grid_size = (round_up(self.box_width,1,self.cell_size),round_up(self.box_height,1,self.cell_size),round_up(self.box_depth,1,self.cell_size))
-        print("Number of cells:",(round_up(self.box_width,1,self.cell_size),round_up(self.box_height,1,self.cell_size),round_up(self.box_depth,1,self.cell_size)))
-        self.scalar_size = (round_up(self.box_width,1,self.cube_size),round_up(self.box_height,1,self.cube_size),round_up(self.box_depth,1,self.cube_size))
-        print("Marching cubes resolution:",self.scalar_size)
-        self.scalar_field = ti.Vector.field(self.dim,dtype=int,shape=self.scalar_size)
+        # print("Number of cells:",(round_up(self.box_width,1,self.cell_size),round_up(self.box_height,1,self.cell_size),round_up(self.box_depth,1,self.cell_size)))
+        # self.scalar_size = (round_up(self.box_width,1,self.cube_size),round_up(self.box_height,1,self.cube_size),round_up(self.box_depth,1,self.cube_size))
 
         ti.root.dense(ti.i, self.max_particles).place(self.old_positions, self.positions, self.velocities, self.densities)
         grid_snode = ti.root.dense(ti.ijk, self.grid_size)
