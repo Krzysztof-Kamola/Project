@@ -154,18 +154,13 @@ class Simulator:
         self.diffuse_num_neighbors = ti.field(dtype=int)
         #grid2diffuse = ti.field(int)
 
-
-        #scalar_size = (box_width,box_height,box_depth)
         self.cell_size = 2*self.neighbor_radius
-        # self.cube_size = self.h/2
 
         def round_up(f, s, c):
             return (math.floor(f * (1/c) / s) + 1) * s
 
         print("Box size:",self.box_width,self.box_height,self.box_depth)
         self.grid_size = (round_up(self.box_width,1,self.cell_size),round_up(self.box_height,1,self.cell_size),round_up(self.box_depth,1,self.cell_size))
-        # print("Number of cells:",(round_up(self.box_width,1,self.cell_size),round_up(self.box_height,1,self.cell_size),round_up(self.box_depth,1,self.cell_size)))
-        # self.scalar_size = (round_up(self.box_width,1,self.cube_size),round_up(self.box_height,1,self.cube_size),round_up(self.box_depth,1,self.cube_size))
 
         ti.root.dense(ti.i, self.max_particles).place(self.old_positions, self.positions, self.velocities, self.densities)
         grid_snode = ti.root.dense(ti.ijk, self.grid_size)
@@ -234,7 +229,7 @@ class Simulator:
 
     @ti.func
     def is_in_grid(self,c):
-        return self.left_bound <= c[0] and c[0] < self.right_bound and self.bottom_bound <= c[1] and c[1] < self.top_bound and self.front_bound <= c[2] and c[2] < self.back_bound
+        return 0 <= c[0] and c[0] < self.grid_size[0] and 0 <= c[1] and c[1] < self.grid_size[1] and 0 <= c[2] and c[2] < self.grid_size[2]
 
 
     # @ti.kernel
@@ -547,6 +542,16 @@ class Simulator:
         self.find_surface_particles()
         self.compute_surface_normals()
 
+    def PBF_no_vorticity(self):
+        self.PBF_first_step()
+        for i in range(self.iters):
+            self.substep()
+        self.final_step()
+        self.viscocity()
+        self.compute_density()
+        self.find_surface_particles()
+        self.compute_surface_normals()
+
     def fluid_sim(self):
         self.PBF_first_step()
         for i in range(self.iters):
@@ -557,6 +562,14 @@ class Simulator:
         self.compute_density()
         self.find_surface_particles()
         self.compute_surface_normals()
+
+    @ti.kernel
+    def calc_volume(self) -> float:
+        total_vol = 0.0
+        for i in range(self.total_particles[0]):
+            total_vol += ti.abs(self.mass/self.densities[i])
+        return total_vol
+
 
 
     # Diffuse particle code
