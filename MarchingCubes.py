@@ -77,8 +77,6 @@ class MarchingCubes:
     def get_cell(self,pos):
         return int(ti.floor(pos / self.cube_size))
     
-
-    
     @ti.func
     def get_pos(self,cell):
         return cell * self.cube_size
@@ -87,7 +85,7 @@ class MarchingCubes:
     def update_grid(self):
         self.grid_num_particles.fill(0)
         self.grid_num_diffuse.fill(0)
-
+        # Get number of particle in a cell 
         for i in range(self.total_particles[0]):
             cell = self.get_cell(self.particles[i])
             for offs in ti.static(ti.grouped(ti.ndrange((0, 2), (0, 2), (0, 2)))):
@@ -102,6 +100,7 @@ class MarchingCubes:
                 if self.is_in_grid(cell_to_check):
                     self.grid_num_diffuse[cell_to_check] += 1
         
+        # Handeling bounds
         for cell in ti.grouped(self.grid_num_particles):
             if cell[0] == self.grid_size[0]:
                 self.grid_num_particles[cell] = 0
@@ -189,6 +188,7 @@ class MarchingCubes:
 
     @ti.func
     def compute_indicies(self):
+        # Find which corners of the cube are active
          self.cube_index.fill(0)
          for cell in ti.grouped(self.grid_num_particles):
             cubeindex = 0
@@ -216,6 +216,8 @@ class MarchingCubes:
         cubeindex =  self.cube_index[cell]
         for i in range(0,12):
             self.vert_lists[cell,i] = [0.0,0.0,0.0]
+        
+        #Update list of verticies based on look-up table
         if self.edge_table[cubeindex] == 0:
             pass
         if self.edge_table[cubeindex] & 1:
@@ -226,7 +228,6 @@ class MarchingCubes:
             cell1_pos = self.get_pos(cell1)
             cell2_pos = self.get_pos(cell2)
             self.vert_lists[cell,0] = self.VertexInterp(self.isolevel,cell1_pos,cell2_pos,cell1_val,cell2_val)
-            self.vert_colour_lists[cell,0] = self.ColourInterp(self.diffuse_level,self.grid_num_particles[cell1],self.grid_num_particles[cell2],self.grid_num_diffuse[cell1],self.grid_num_diffuse[cell1])
         if self.edge_table[cubeindex] & 2:
             cell1 = cell + ti.Vector([1,0,0])
             cell2 = cell + ti.Vector([1,0,1])
@@ -235,7 +236,6 @@ class MarchingCubes:
             cell1_pos = self.get_pos(cell1)
             cell2_pos = self.get_pos(cell2)
             self.vert_lists[cell,1] = self.VertexInterp(self.isolevel,cell1_pos,cell2_pos,cell1_val,cell2_val)
-            self.vert_colour_lists[cell,1] = self.ColourInterp(self.diffuse_level,self.grid_num_particles[cell1],self.grid_num_particles[cell2],self.grid_num_diffuse[cell1],self.grid_num_diffuse[cell1])
         if self.edge_table[cubeindex] & 4:
             cell1 = cell + ti.Vector([1,0,1])
             cell2 = cell + ti.Vector([0,0,1])
@@ -244,7 +244,6 @@ class MarchingCubes:
             cell1_pos = self.get_pos(cell1)
             cell2_pos = self.get_pos(cell2)
             self.vert_lists[cell,2] = self.VertexInterp(self.isolevel,cell1_pos,cell2_pos,cell1_val,cell2_val)
-            self.vert_colour_lists[cell,2] = self.ColourInterp(self.diffuse_level,self.grid_num_particles[cell1],self.grid_num_particles[cell2],self.grid_num_diffuse[cell1],self.grid_num_diffuse[cell1])
         if self.edge_table[cubeindex] & 8:
             cell1 = cell + ti.Vector([0,0,1])
             cell2 = cell + ti.Vector([0,0,0])
@@ -253,7 +252,6 @@ class MarchingCubes:
             cell1_pos = self.get_pos(cell1)
             cell2_pos = self.get_pos(cell2)
             self.vert_lists[cell,3] = self.VertexInterp(self.isolevel,cell1_pos,cell2_pos,cell1_val,cell2_val)
-            self.vert_colour_lists[cell,3] = self.ColourInterp(self.diffuse_level,self.grid_num_particles[cell1],self.grid_num_particles[cell2],self.grid_num_diffuse[cell1],self.grid_num_diffuse[cell1])
         if self.edge_table[cubeindex] & 16:
             cell1 = cell + ti.Vector([0,1,0])
             cell2 = cell + ti.Vector([1,1,0])
@@ -262,7 +260,6 @@ class MarchingCubes:
             cell1_pos = self.get_pos(cell1)
             cell2_pos = self.get_pos(cell2)
             self.vert_lists[cell,4] = self.VertexInterp(self.isolevel,cell1_pos,cell2_pos,cell1_val,cell2_val)
-            self.vert_colour_lists[cell,4] = self.ColourInterp(self.diffuse_level,self.grid_num_particles[cell1],self.grid_num_particles[cell2],self.grid_num_diffuse[cell1],self.grid_num_diffuse[cell1])
         if self.edge_table[cubeindex] & 32:
             cell1 = cell + ti.Vector([1,1,0])
             cell2 = cell + ti.Vector([1,1,1])
@@ -271,7 +268,6 @@ class MarchingCubes:
             cell1_pos = self.get_pos(cell1)
             cell2_pos = self.get_pos(cell2)
             self.vert_lists[cell,5] = self.VertexInterp(self.isolevel,cell1_pos,cell2_pos,cell1_val,cell2_val)
-            self.vert_colour_lists[cell,5] = self.ColourInterp(self.diffuse_level,self.grid_num_particles[cell1],self.grid_num_particles[cell2],self.grid_num_diffuse[cell1],self.grid_num_diffuse[cell1])
         if self.edge_table[cubeindex] & 64:
             cell1 = cell + ti.Vector([1,1,1])
             cell2 = cell + ti.Vector([0,1,1])
@@ -280,7 +276,6 @@ class MarchingCubes:
             cell1_pos = self.get_pos(cell1)
             cell2_pos = self.get_pos(cell2)
             self.vert_lists[cell,6] = self.VertexInterp(self.isolevel,cell1_pos,cell2_pos,cell1_val,cell2_val)
-            self.vert_colour_lists[cell,6] = self.ColourInterp(self.diffuse_level,self.grid_num_particles[cell1],self.grid_num_particles[cell2],self.grid_num_diffuse[cell1],self.grid_num_diffuse[cell1])
         if self.edge_table[cubeindex] & 128:
             cell1 = cell + ti.Vector([0,1,1])
             cell2 = cell + ti.Vector([0,1,0])
@@ -289,7 +284,6 @@ class MarchingCubes:
             cell1_pos = self.get_pos(cell1)
             cell2_pos = self.get_pos(cell2)
             self.vert_lists[cell,7] = self.VertexInterp(self.isolevel,cell1_pos,cell2_pos,cell1_val,cell2_val)
-            self.vert_colour_lists[cell,7] = self.ColourInterp(self.diffuse_level,self.grid_num_particles[cell1],self.grid_num_particles[cell2],self.grid_num_diffuse[cell1],self.grid_num_diffuse[cell1])
         if self.edge_table[cubeindex] & 256:
             cell1 = cell
             cell2 = cell + ti.Vector([0,1,0])
@@ -298,7 +292,6 @@ class MarchingCubes:
             cell1_pos = self.get_pos(cell1)
             cell2_pos = self.get_pos(cell2)
             self.vert_lists[cell,8] = self.VertexInterp(self.isolevel,cell1_pos,cell2_pos,cell1_val,cell2_val)
-            self.vert_colour_lists[cell,8] = self.ColourInterp(self.diffuse_level,self.grid_num_particles[cell1],self.grid_num_particles[cell2],self.grid_num_diffuse[cell1],self.grid_num_diffuse[cell1])
         if self.edge_table[cubeindex] & 512:
             cell1 = cell + ti.Vector([1,0,0])
             cell2 = cell + ti.Vector([1,1,0])
@@ -307,7 +300,6 @@ class MarchingCubes:
             cell1_pos = self.get_pos(cell1)
             cell2_pos = self.get_pos(cell2)
             self.vert_lists[cell,9] = self.VertexInterp(self.isolevel,cell1_pos,cell2_pos,cell1_val,cell2_val)
-            self.vert_colour_lists[cell,9] = self.ColourInterp(self.diffuse_level,self.grid_num_particles[cell1],self.grid_num_particles[cell2],self.grid_num_diffuse[cell1],self.grid_num_diffuse[cell1])
         if self.edge_table[cubeindex] & 1024:
             cell1 = cell + ti.Vector([1,0,1])
             cell2 = cell + ti.Vector([1,1,1])
@@ -316,7 +308,6 @@ class MarchingCubes:
             cell1_pos = self.get_pos(cell1)
             cell2_pos = self.get_pos(cell2)
             self.vert_lists[cell,10] = self.VertexInterp(self.isolevel,cell1_pos,cell2_pos,cell1_val,cell2_val)
-            self.vert_colour_lists[cell,10] = self.ColourInterp(self.diffuse_level,self.grid_num_particles[cell1],self.grid_num_particles[cell2],self.grid_num_diffuse[cell1],self.grid_num_diffuse[cell1])
         if self.edge_table[cubeindex] & 2048:
             cell1 = cell + ti.Vector([0,0,1])
             cell2 = cell + ti.Vector([0,1,1])
@@ -324,41 +315,23 @@ class MarchingCubes:
             cell2_val = self.grid_num_particles[cell2]
             cell1_pos = self.get_pos(cell1)
             cell2_pos = self.get_pos(cell2)
-            self.vert_lists[cell,11] = self.VertexInterp(self.isolevel,cell1_pos,cell2_pos,cell1_val,cell2_val)
-            self.vert_colour_lists[cell,11] = self.ColourInterp(self.diffuse_level,self.grid_num_particles[cell1],self.grid_num_particles[cell2],self.grid_num_diffuse[cell1],self.grid_num_diffuse[cell1])
-        
+            self.vert_lists[cell,11] = self.VertexInterp(self.isolevel,cell1_pos,cell2_pos,cell1_val,cell2_val)        
         i = 0
         num_triangles = 0
         index = (cell[2] * self.grid_size[0] * self.grid_size[1]) + (cell[1] * self.grid_size[0]) + cell[0]
         while self.tri_table[(cubeindex,i)] != -1:
+            # Set traingles
             self.triangles[index * 15 + (i + 0)] = self.vert_lists[cell,self.tri_table[(cubeindex,i)]]
             self.triangles[index * 15 + (i + 1)] = self.vert_lists[cell,self.tri_table[(cubeindex,i+1)]]
             self.triangles[index * 15 + (i + 2)] = self.vert_lists[cell,self.tri_table[(cubeindex,i+2)]]
 
-            self.colour[index * 15 + (i + 0)] = self.vert_colour_lists[cell,self.tri_table[(cubeindex,i)]]
-            self.colour[index * 15 + (i + 1)] = self.vert_colour_lists[cell,self.tri_table[(cubeindex,i+1)]]
-            self.colour[index * 15 + (i + 2)] = self.vert_colour_lists[cell,self.tri_table[(cubeindex,i+2)]]
-
-            #
+            #Set colours at each vertex
             cell2 = self.get_cell(self.vert_lists[cell,self.tri_table[(cubeindex,i)]])
             self.colour[index * 15 + (i + 0)] = self.ColourInterp2(self.diffuse_level,self.grid_num_particles[cell2],self.grid_num_diffuse[cell2])
             cell2 = self.get_cell(self.vert_lists[cell,self.tri_table[(cubeindex,i+1)]])
             self.colour[index * 15 + (i + 1)] = self.ColourInterp2(self.diffuse_level,self.grid_num_particles[cell2],self.grid_num_diffuse[cell2])
             cell2 = self.get_cell(self.vert_lists[cell,self.tri_table[(cubeindex,i+2)]])
             self.colour[index * 15 + (i + 2)] = self.ColourInterp2(self.diffuse_level,self.grid_num_particles[cell2],self.grid_num_diffuse[cell2])
-
-            # if self.grid_num_diffuse[self.get_cell(self.vert_lists[cell,self.tri_table[(cubeindex,i)]])] > 3:
-            #     self.colour[index * 15 + (i + 0)] = self.diffuse_color
-            # else:
-            #     self.colour[index * 15 + (i + 0)] = self.particle_color
-            # if self.grid_num_diffuse[self.get_cell(self.vert_lists[cell,self.tri_table[(cubeindex,i+1)]])] > 3:
-            #     self.colour[index * 15 + (i + 1)] = self.diffuse_color
-            # else:
-            #     self.colour[index * 15 + (i + 1)] = self.particle_color
-            # if self.grid_num_diffuse[self.get_cell(self.vert_lists[cell,self.tri_table[(cubeindex,i+2)]])] > 3:
-            #     self.colour[index * 15 + (i + 2)] = self.diffuse_color
-            # else:
-            #     self.colour[index * 15 + (i + 2)] = self.particle_color
 
             num_triangles += 3
             i += 3
@@ -383,8 +356,6 @@ class MarchingCubes:
         for cell in ti.grouped(self.grid_num_particles):
             self.create_iso_surface(cell)
         
-
-
     @ti.kernel
     def create_mesh(self):
         total_triangles = 0
@@ -393,11 +364,3 @@ class MarchingCubes:
                 self.triangles[total_triangles] = self.cube_triangles[cell,i]
                 total_triangles += 1
         self.total_triangles[0] = total_triangles
-        #self.total_triangles[0] = total_triangles
-
-
-# @ti.kernel
-# def marchingcubes(self):
-#     for i in range(0,num_cubes):
-#         self.create_iso_surface(i)
-        

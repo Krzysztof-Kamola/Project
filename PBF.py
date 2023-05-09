@@ -19,19 +19,20 @@ class Simulator:
     bound_damping = -0.5
     
     def __init__(self,max_num_particles_per_cell=100,max_num_neighbors=100,dt=1.0/60.0,iters=10,
-                 epsilon=1e-5,particle_radius=0.25,left_bound=0.0,right_bound=20.0,bottom_bound=0.0,top_bound=40.0,back_bound=20.0,front_bound=0.0,
-                 h=1.1,rho=1.0,lambda_epsilon=100.0,num_iters=10,corr_deltaQ_coeff=0.1,corrK=0.01,vorticity_eps=0.01,viscocity_const=0.1,
-                 density_threshold=0.02,drag=0.1,buoyancy=0.9,k_ta=100,k_wc=100,max_particles=50000,max_diffuse_particles=1000,life_time=1.0):
+                 epsilon=1e-3,particle_radius=0.25,left_bound=0.0,right_bound=20.0,bottom_bound=0.0,top_bound=40.0,back_bound=20.0,front_bound=0.0,
+                 h=1.1,rho=1.0,corr_deltaQ_coeff=0.1,corrK=0.01,vorticity_eps=0.01,viscocity_const=0.1,
+                 density_threshold=0.02,drag=0.4,buoyancy=0.9,k_ta=100,k_wc=100,max_particles=50000,max_diffuse_particles=1000,life_time=1.0):
         
         self.max_num_particles_per_cell = max_num_particles_per_cell
         self.max_num_neighbors = max_num_neighbors
-        self.dt = dt
-        self.epsilon = epsilon
+        self.dt = dt # Change in time
+        self.epsilon = epsilon # Relaxation parameter
         self.particle_radius = particle_radius
-        self.iters = iters
+        self.iters = iters # Number of iterations
         self.max_particles = max_particles
         self.total_particles = ti.field(int,shape=1)
         self.total_particles[0] = 0
+        
         #bounds
 
         self.left_bound = left_bound
@@ -47,57 +48,30 @@ class Simulator:
         self.box_height = int(np.abs(self.bottom_bound - self.top_bound))
         self.box_depth = int(np.abs(self.front_bound - self.back_bound))
 
-        #particle initial space
-
-        self.p_left_bound =  0.0
-        self.p_right_bound = 10.0
-        self.p_bottom_bound = 0.0
-        self.p_top_bound = 30.0
-        self.p_back_bound = 10.0
-        self.p_front_bound = 0.0
-
-        self.h = h
+        self.h = h # Particle influence radius
         self.diameter = self.h * 0.6
-
-        self.num_paticles_x = int(np.abs(self.p_left_bound - self.p_right_bound) / self.diameter)
-        self.num_paticles_y = int(np.abs(self.p_bottom_bound - self.p_top_bound) / self.diameter)
-        self.num_paticles_z = int(np.abs(self.p_front_bound - self.p_back_bound) / self.diameter)
-
-        #self.total_particles[0] = int(self.num_paticles_x*self.num_paticles_y*self.num_paticles_z)
-        # print("Total number of particles: ", self.total_particles)
-
         self.neighbor_radius = self.h * 1.1
         self.cell_size = 2 * self.neighbor_radius
-
-        # def round_up(f, s):
-        #     return (math.floor(f * (1/cell_size) / s) + 1) * s
-
-        # grid_size = (round_up(right_bound,1), round_up(top_bound,1), round_up(back_bound,1))
-
-        # num_cells_x = int(self.box_width / self.cell_size)
-        # num_cells_y = int(self.box_height / self.cell_size)
-        # num_cells_z = int(self.box_depth / self.cell_size)
-
-        # self.num_cells = int(num_cells_x*num_cells_y*num_cells_z)
-
-        self.v = ti.Vector.field(self.dim,dtype=float,shape=(self.max_particles,))
-
+        
         self.mass = 1.0
-        self.rho = rho
-        self.lambda_epsilon = lambda_epsilon
-        self.num_iters = num_iters
+        self.rho = rho # desnity
+        
+        #parameters for s_corr used for surface tension
         self.corr_deltaQ_coeff = corr_deltaQ_coeff
         self.corrK = corrK
+        
         self.gravity = ti.Vector([0.0, -9.8, 0.0])
         self.vorticity_eps = vorticity_eps
         self.viscocity_const = viscocity_const
         self.density_threshold = density_threshold # Used for find surface particles
         self.rV = self.h # volume radius of a fluid particle
+        
+        # Bubble parameters
         self.drag = drag
         self.buoyancy = buoyancy
 
-        self.k_ta = k_ta
-        self.k_wc = k_wc
+        self.k_ta = k_ta # number of diffuse particles generated per second
+        self.k_wc = k_wc # number of diffuse particles generated at wave crests per second
         self.life_time = life_time
 
         self.poly6_factor = 315.0 / 64.0 / math.pi
@@ -182,10 +156,6 @@ class Simulator:
             x = ti.pow((ti.pow(h,2) - ti.pow(s,2)) / ti.pow(h,3),3)
             poly6_factor = 315.0/(64.0*ti.math.pi*ti.pow(h,9))
             result = poly6_factor * x
-
-            # x = ti.pow((ti.pow(h,2) - ti.math.pow(s,2)),3)
-            # #poly6_factor = 315.0/(64.0*ti.math.pi*ti.pow(h,9))
-            # result = poly6_factor * x
         return result
 
     @ti.func
@@ -231,59 +201,6 @@ class Simulator:
     def is_in_grid(self,c):
         return 0 <= c[0] and c[0] < self.grid_size[0] and 0 <= c[1] and c[1] < self.grid_size[1] and 0 <= c[2] and c[2] < self.grid_size[2]
 
-
-    # @ti.kernel
-    # def init_cubes(self):
-    #     for i in range(0,num_points_x-1):
-    #         for j in range(0,num_points_y-1):
-    #             for k in range(0,num_points_z-1):
-    #                 index = int((k* (num_points_x-1) * (num_points_y-1)) + (j * (num_points_x-1)) + i)
-    #                 index2 = int((k* num_points_x * num_points_y) + (j * num_points_x) + i)
-    #                 cubes[index].corner1 = scalar_field_x[index2]
-    #                 cubes[index].val1 = index2
-    #                 index2 = int((k* num_points_x * num_points_y) + (j * num_points_x) + (i+1))
-    #                 cubes[index].corner2 = scalar_field_x[index2]
-    #                 cubes[index].val2 = index2
-    #                 index2 = int(((k+1)* num_points_x * num_points_y) + ((j) * num_points_x) + (i+1))
-    #                 cubes[index].corner3 = scalar_field_x[index2]
-    #                 cubes[index].val3 = index2
-    #                 index2 = int(((k+1)* num_points_x * num_points_y) + ((j) * num_points_x) + (i))
-    #                 cubes[index].corner4 = scalar_field_x[index2]
-    #                 cubes[index].val4 = index2
-    #                 index2 = int(((k)* num_points_x * num_points_y) + ((j+1) * num_points_x) + i)
-    #                 cubes[index].corner5 = scalar_field_x[index2]
-    #                 cubes[index].val5 = index2
-    #                 index2 = int(((k)* num_points_x * num_points_y) + ((j+1) * num_points_x) + (i+1))
-    #                 cubes[index].corner6 = scalar_field_x[index2]
-    #                 cubes[index].val6 = index2
-    #                 index2 = int(((k+1)* num_points_x * num_points_y) + ((j+1) * num_points_x) + (i+1))
-    #                 cubes[index].corner7 = scalar_field_x[index2]
-    #                 cubes[index].val7 = index2
-    #                 index2 = int(((k+1) * num_points_x * num_points_y) + ((j+1) * num_points_x) + (i))
-    #                 cubes[index].corner8 = scalar_field_x[index2]
-    #                 cubes[index].val8 = index2
-
-    # @ti.func
-    # def update_field(self):
-    #     for i in range(0,num_points):
-    #         scalar_field[i] = 0.0
-    #         for j in range(0,total_particles):
-    #             rij = scalar_field_x[i] - x[j]
-    #             r2 = ti.math.dot(rij,rij)
-    #             if r2 < 25.0:
-    #                 scalar_field[i] += 1.0
-
-    @ti.func
-    def initialize_mass_points(self):
-        for i in range(0,self.num_paticles_x):
-            for j in range(0,self.num_paticles_y):
-                for k in range(0,self.num_paticles_z):
-                    index = (k* self.num_paticles_x * self.num_paticles_y) + (j * self.num_paticles_x) + i
-                    self.positions[index] = [(i*self.diameter + self.p_left_bound) + ti.random() / 10,
-                    j*self.diameter + self.p_bottom_bound,
-                    k*self.diameter + self.p_front_bound + ti.random() / 10]
-                    self.velocities[index] = [0.0,0.0,0.0]
-
     @ti.kernel
     def spawn_fluid(self,origin: ti.types.vector(3,float),width: float,height: float,depth: float,spacing: float):
         
@@ -320,10 +237,13 @@ class Simulator:
             pos[2] = self.front_bound
         return pos
 
+    # PBF simulation based on the paper Position-Based-Fluids by Macklin
+    # Solution also based of the 2D implementation by Ye Kuang
     @ti.func
     def get_cell(self,pos):
         return int(ti.floor(pos / self.cell_size))
 
+    # find particle neighbours
     @ti.func
     def set_grid(self):
         self.grid_num_particles.fill(0)
@@ -368,20 +288,7 @@ class Simulator:
     def PBF_first_step(self):
         self.save_old_positions()
         self.apply_forces()
-
-        # Note grid optimisation doesnt work properly when dt is too small
         self.set_grid()
-
-        # find a particels neighbours
-        # for i in positions:
-        #     n_i = 0
-        #     for j in range(0,total_particles):
-        #         if i != j and n_i < max_num_neighbors and (positions[i] - positions[j]).norm() < neighbor_radius:
-        #             rij = positions[i] - positions[j]
-        #             cover_vector[i] += ti.math.normalize(rij)
-        #             particle_neighbors[i,n_i] = j
-        #             n_i += 1
-        #     particle_num_neighbors[i] = n_i
 
     @ti.kernel
     def substep(self):
@@ -400,12 +307,14 @@ class Simulator:
                 grad_j = self.spiky_gradient(pos_ij,self.h)
                 grad_i += grad_j
                 sum_grad_sqr += grad_j.dot(grad_j)
+                # Eq. 2
                 density += self.poly6_value(pos_ij.norm(), self.h)
 
+            # Eq. 1
             density_constraint = (self.mass * density/self.rho) - 1.0
-
             sum_grad_sqr += grad_i.dot(grad_i)
-            self.lambdas[i] = -(density_constraint)/ (sum_grad_sqr + self.lambda_epsilon)
+            # Eq. 11
+            self.lambdas[i] = -(density_constraint)/ (sum_grad_sqr + self.epsilon)
         
         for i in range(self.total_particles[0]):
             p_i = self.positions[i]
@@ -420,6 +329,7 @@ class Simulator:
                 lambda_j = self.lambdas[j_i]
                 pos_ij = p_i - p_j
                 scorr = self.compute_scorr(pos_ij)
+                # Eq. 14
                 self.scorr_list[i] += scorr
                 pos_delta_i += (lambda_i + lambda_j + scorr) * \
                     self.spiky_gradient(pos_ij,self.h)
@@ -440,6 +350,7 @@ class Simulator:
                 if p_j < 0:
                     break
                 pos_ji = pos_i - self.positions[p_j]
+                # Eq. 15
                 self.vorticity[i] += self.mass * (self.velocities[p_j] - self.velocities[i]).cross(self.spiky_gradient(pos_ji, self.h))
 
         for i in range(self.total_particles[0]):
@@ -452,12 +363,13 @@ class Simulator:
                 pos_ji = pos_i - self.positions[p_j]
                 loc_vec_i += self.mass * self.vorticity[p_j].norm() * self.spiky_gradient(pos_ji, self.h)
             vorticity_i = self.vorticity[i]
-            # loc_vec_i += mass * omega_i.norm() * spiky_gradient(pos_i * 0.0, h) / (epsilon + density[i])
             loc_vec_i = loc_vec_i / (self.epsilon + loc_vec_i.norm())
+            # Eq. 16
             self.velocities[i] += (self.vorticity_eps * loc_vec_i.cross(vorticity_i))/self.mass * self.dt
 
     @ti.kernel
     def viscocity(self):
+        # Eq. 17
         for i in range(self.total_particles[0]):
             p_i = self.positions[i]
             v_i = self.velocities[i]
@@ -512,11 +424,11 @@ class Simulator:
                     if p_j < 0:
                         break
                     pos_ji = pos_i - self.positions[p_j]
-                    normal += self.spiky_gradient(pos_ji, self.h)
+                    normal += self.mass * self.densities[p_j] * self.cubic_spline(pos_ji, self.h)
 
                 self.surface_normals[p_i] = normal.normalized()
             else:
-                self.surface_normals[p_i] = ti.Vector([0.0, 0.0, 0.0])
+                self.surface_normals[p_i] = ti.Vector([0.0, 1.0, 0.0])
 
     @ti.kernel
     def final_step(self):
@@ -528,7 +440,7 @@ class Simulator:
             if self.surface[i] == 0:
                 self.colour[i] = self.particle_color
             else:
-                self.colour[i] = self.particle_color
+                self.colour[i] = self.surface_color
             self.velocities[i] = (self.positions[i] - self.old_positions[i])/self.dt
 
     def PBF(self):
@@ -542,36 +454,6 @@ class Simulator:
         self.find_surface_particles()
         self.compute_surface_normals()
 
-    def PBF_no_vorticity(self):
-        self.PBF_first_step()
-        for i in range(self.iters):
-            self.substep()
-        self.final_step()
-        self.viscocity()
-        self.compute_density()
-        self.find_surface_particles()
-        self.compute_surface_normals()
-
-    def fluid_sim(self):
-        self.PBF_first_step()
-        for i in range(self.iters):
-            self.substep()
-        self.final_step()
-        self.vorticity_confinement()
-        self.viscocity()
-        self.compute_density()
-        self.find_surface_particles()
-        self.compute_surface_normals()
-
-    @ti.kernel
-    def calc_volume(self) -> float:
-        total_vol = 0.0
-        for i in range(self.total_particles[0]):
-            total_vol += ti.abs(self.mass/self.densities[i])
-        return total_vol
-
-
-
     # Diffuse particle code
     # Based on the paper:
     # "Unified Spray, Foam and Bubbles for Particle-Based Fluids" by Markus Ihmsen et al.
@@ -583,22 +465,21 @@ class Simulator:
                 kappa_i = 0.0
                 for j in range(self.particle_num_neighbors[p_i]):
                     p_j = self.particle_neighbors[p_i, j]
-                    if p_j < 0:
+                    if p_j < 0 or self.surface[p_j] == 0:
                         break
-                    if self.surface[p_j] == 1:
-                        pos_ij = self.positions[p_i] - self.positions[p_j]
-                        pos_ji = self.positions[p_j] - self.positions[p_i]
-                        vel_ij = self.velocities[p_i] - self.velocities[p_j]
-                        vel_n = vel_ij.normalized()
-                        pos_ij_n = pos_ij.normalized()
-                        pos_ji_n = pos_ji.normalized()
-                        # Eq 2
-                        v_diff_i += vel_ij.norm() * (1 - vel_n.dot(pos_ij_n)) * self.weighting(pos_ij,self.h)
-                        # Eq 4
-                        kappa_ij = (1 - self.surface_normals[p_i].dot(self.surface_normals[p_j])) * self.weighting(pos_ij, self.h)
-                        # Eq 6
-                        if pos_ji_n.dot(self.surface_normals[p_i]) < 0:
-                            kappa_i += kappa_ij
+                    pos_ij = self.positions[p_i] - self.positions[p_j]
+                    pos_ji = self.positions[p_j] - self.positions[p_i]
+                    vel_ij = self.velocities[p_i] - self.velocities[p_j]
+                    vel_n = vel_ij.normalized()
+                    pos_ij_n = pos_ij.normalized()
+                    pos_ji_n = pos_ji.normalized()
+                    # Eq 2
+                    v_diff_i += vel_ij.norm() * (1 - vel_n.dot(pos_ij_n)) * self.weighting(pos_ij,self.h)
+                    # Eq 4
+                    kappa_ij = (1 - self.surface_normals[p_i].dot(self.surface_normals[p_j])) * self.weighting(pos_ij, self.h)
+                    # Eq 6
+                    if pos_ji_n.dot(self.surface_normals[p_i]) < 0:
+                        kappa_i += kappa_ij
 
                 # Eq 1 for each potential 
                 I_ta = self.phi(v_diff_i, 2, 8)
@@ -610,7 +491,7 @@ class Simulator:
                 E_k_i = 0.5 * self.mass * self.velocities[p_i].dot(self.velocities[p_i])
                 I_k = self.phi(E_k_i, 5, 50)
 
-                # Eq 8
+                # Eq 8 
                 self.num_diffuse_particles[p_i] = int(I_k * ((self.k_ta * I_ta) + (self.k_wc * I_wc)) * self.dt)
 
     @ti.kernel
@@ -644,6 +525,7 @@ class Simulator:
 
     @ti.kernel
     def dissolution(self):
+        # Despawn diffuse particles
         for i in range(self.diffuse_count[0]):
             if self.diffuse_particles[i].active == 1 and self.diffuse_particles[i].type == 2:
                 self.diffuse_particles[i].lifespan -= self.dt
@@ -684,19 +566,10 @@ class Simulator:
                                 self.diffuse_neighbors[p_i, nb_i] = p_j
                                 nb_i += 1
                 self.diffuse_num_neighbors[p_i] = nb_i
-                if nb_i > 20:
-                    # bubble
-                    self.diffuse_particles[p_i].type = 3
-                elif nb_i < 6:
-                    # spray
-                    self.diffuse_particles[p_i].type = 1
-                else:
-                    # foam
-                    self.diffuse_particles[p_i].type = 2
 
     @ti.func
     def compute_density_diffuse(self):
-        for p_i in range(self.diffuse_count[0]):
+        for p_i in range(self.max_diffuse_particles):
             pos_i = self.diffuse_particles[p_i].pos
             density = 0.0
 
@@ -704,15 +577,11 @@ class Simulator:
                 p_j = self.diffuse_neighbors[p_i, j]
                 if p_j < 0:
                     break
-                # density += densities[p_j]
                 pos_ji = pos_i - self.positions[p_j]
                 density += self.poly6_value(pos_ji.norm(), self.h)
 
             density = (self.mass * density / self.rho) - 1.0
-            # if diffuse_num_neighbors[p_i] > 0:
-            #     density /= diffuse_num_neighbors[p_i]
-            # else:
-            #     density = 0.0
+            # Classify diffuse particles
             if density < self.density_threshold - 0.01:
                 self.diffuse_particles[p_i].type = 1
             elif density > 0.02:
@@ -761,8 +630,8 @@ class Simulator:
                     if self.diffuse_particles[i].type == 3:
                         # find velocity of bubble
                         # diffuse vel + dt * (-buoyancy*gravity + drag*((v_new - bubble vel)/dt))
-                        drag = 0.4
-                        buoyancy = 0.9
+                        drag = self.drag
+                        buoyancy = self.buoyancy
                         # v_bub = diffuse_particles[i].vel + (((buoyancy * ti.Vector([0.0,9.8,0.0])) + (drag * ((avg_fluid_vel - diffuse_particles[i].vel) / dt))))
                         self.diffuse_particles[i].vel = self.diffuse_particles[i].vel + self.dt * (buoyancy * ti.Vector([0.0, 9.8, 0.0]) + (drag * ((avg_fluid_vel - self.diffuse_particles[i].vel) / self.dt)))
                         self.diffuse_particles[i].pos = self.boundary_check(self.diffuse_particles[i].pos + (self.dt * self.diffuse_particles[i].vel))
@@ -783,95 +652,8 @@ class Simulator:
         self.gen_diffuse_particles()
         self.advect_particles()
         self.dissolution_full()
-
-    def marching_cubes(self):
-        return
     
-    @ti.kernel
-    def init(self):
-        self.initialize_mass_points()
 
     def simulation(self):
         self.PBF()
         self.diffuse()
-
-# def ren():
-#     scene.particles(Sim.positions, radius=Sim.particle_radius, per_vertex_color=Sim.colour)
-
-#     Sim.diffuse_positions.copy_from(Sim.diffuse_particles.pos)
-#     scene.particles(Sim.diffuse_positions, radius=Sim.particle_radius*0.5, color=(1.0,1.0,1.0),index_count=Sim.diffuse_count[0])
-
-#     canvas.scene(scene)
-#     window.show()
-
-# def cam():
-#     if camera_active:
-#         camera.track_user_inputs(window,movement_speed=1)
-#     scene.set_camera(camera)
-#     scene.point_light(pos=(10, 10, 20), color=(1, 1, 1))
-#     scene.ambient_light((0.5, 0.5, 0.5))
-
-# def keyboard_handling():
-#         global camera_active
-#         if window.get_event(tag=ti.ui.PRESS):
-#             if window.event.key == ' ':
-#                 camera_active = not camera_active
-#             if window.event.key == 'r':
-#                 init()
-
-# @ti.kernel
-# def init():
-#     return
-#     initialize_mass_points()
-#     #init_cells()
-
-# camera_active = False
-
-# bound_damping = -0.5
-
-# window = ti.ui.Window("Taichi sim on GGUI", (1024, 800),vsync=True)
-# canvas = window.get_canvas()
-# canvas.set_background_color((0.6, 0.6, 0.6))
-# scene = ti.ui.Scene()
-# camera = ti.ui.Camera()
-# gui = window.get_gui()
-
-# frame = 0
-# camera.position(-0.18,42.7, 100.5)
-# camera.lookat(0.0, 0.0, 0.0)
-
-# Sim = Simulator(diffuse_on=False)
-# Sim.init()
-# print("Finished intializing")
-
-# while window.running:
-#     keyboard_handling()
-#     cam()
-#     Sim.
-
-#     # print("Num diffuse:",diffuse_count[0])
-
-    
-#     scene.particles(Sim.positions, radius=Sim.particle_radius, per_vertex_color=Sim.colour)
-
-#     Sim.diffuse_positions.copy_from(Sim.diffuse_particles.pos)
-#     scene.particles(Sim.diffuse_positions, radius=Sim.particle_radius*0.5, color=(1.0,1.0,1.0),index_count=Sim.diffuse_count[0])
-
-#     canvas.scene(scene)
-#     window.show()
-
-#     # if frame % 20 == 0:
-#     #     print("Frame:", frame)
-#     #     num = densities.to_numpy()
-#     #     max_,min_,avg= np.max(num), np.min(num), np.mean(num)
-#     #     print("Max neighbours:",max_, "Min neighbours:", min_, "avg :", avg)
-#     #     print("Num diffuse:",diffuse_count[0])
-
-#     #frame += 1
-#     # print(diffuse_num_neighbors.to_numpy())
-
-#     #marchingcubes()
-#     #print(boundary[10])
-#     #print(scalar_field[1])
-#     #scene.particles(scalar_field, radius=0.3 * 0.95, color=(0.5, 0.42, 0.8))
-#     #print(dt)
