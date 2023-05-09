@@ -18,3 +18,5 @@ The basic order of creating your own scenario is:
 - Then run cubes.marching_cubes and use cubes.triangles scene.mesh
 
 These steps are all shown in the tests copying them and changing parameters should work.
+
+If the program doesnt work change parameters to have a smaller boundary or to have a smaller amount particles.
